@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "claude_dir": "~/.claude",
+  "include_sessions": true,
+  "include_todos": true,
+  "projects": [],
+  "git_auto_push": false,
+  "git_remote": "origin",
+  "git_branch": "main"
+}
