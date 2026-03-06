@@ -1,534 +1,443 @@
-# Claude Code Settings Backup & Restore Guide
+# Claude Code Backup & Restore Guide v2
 
-A comprehensive guide to backing up and restoring your Claude Code settings across machines.
+A config-driven system for backing up and restoring your complete Claude Code environment -- settings, memory, skills, plugins, plans, commands, sessions, and more.
 
 ## Table of Contents
 
 - [Overview](#overview)
 - [What to Backup](#what-to-backup)
 - [What NOT to Backup](#what-not-to-backup)
-- [Platform-Specific Locations](#platform-specific-locations)
 - [Quick Start](#quick-start)
 - [Detailed Instructions](#detailed-instructions)
-- [Security Best Practices](#security-best-practices)
+- [Scheduling Automatic Backups](#scheduling-automatic-backups)
+- [Security](#security)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
 
 ## Overview
 
-Claude Code stores settings in several locations on your machine. This guide helps you:
+Claude Code stores a rich set of data across your machine: global instructions, per-project memory, installed skills, plugins, saved plans, custom commands, session transcripts, and MCP server configurations. Losing any of these means rebuilding your environment from scratch.
 
-- **Backup** your settings to a private Git repository
-- **Restore** settings on a new machine
-- **Maintain security** by handling credentials properly
-- **Share configurations** across your devices
+This guide provides three scripts that back up the full Claude Code data model to a private Git repository:
+
+- **`init.sh`** -- First-time setup. Scans your projects, generates `backup-config.json`.
+- **`backup.sh`** -- Config-driven, modular backup with auto-commit and optional auto-push. Fully non-interactive (safe for cron).
+- **`restore.sh`** -- Interactive restore with per-category prompts (or `--yes` for unattended restore).
+
+**Requirements:** bash, git, [jq](https://jqlang.github.io/jq/)
 
 ## What to Backup
 
-These files contain your preferences and should be backed up:
+The v2 system backs up every category of Claude Code data that matters for portability:
 
-| File | Description | Platform |
-|------|-------------|----------|
-| `CLAUDE.md` | Global instructions for Claude | All |
-| `settings.json` | Basic settings (e.g., alwaysThinkingEnabled) | All |
-| `settings.local.json` | Permissions and advanced settings | All |
-| MCP server configs | Model Context Protocol server configurations | All |
-| Project-specific `CLAUDE.md` | Per-project instructions | All |
-
-### Important Settings Files
-
-**Global Instructions** (`CLAUDE.md`)
-- Custom instructions that apply to all Claude Code sessions
-- Personal coding preferences, style guides, etc.
-- Located in: `~/.claude/CLAUDE.md`
-
-**Basic Settings** (`settings.json`)
-- Simple key-value settings
-- Example: `{"alwaysThinkingEnabled": true}`
-- Located in: `~/.claude/settings.json`
-
-**Advanced Settings** (`settings.local.json`)
-- Permission rules (which commands/tools are auto-approved)
-- May contain sensitive data (passwords, API keys)
-- **Requires sanitization** before backup
-- Located in: `~/.claude/settings.local.json`
-
-**MCP Server Configurations**
-- SSH connections, database connections, custom tools
-- Stored in Claude Code's configuration system
-- Export with: `claude mcp list`
+| Category | Source Location | Backup Directory | Description |
+|----------|----------------|------------------|-------------|
+| Global instructions | `~/.claude/CLAUDE.md` | `global/` | Custom instructions for all sessions |
+| Extra context files | `~/.claude/*.md` | `global/` | Additional markdown context files |
+| Settings | `~/.claude/settings.json` | `global/` | Basic settings (e.g., alwaysThinkingEnabled) |
+| Local settings | `~/.claude/settings.local.json` | `global/` | Permission rules and advanced settings |
+| Keybindings | `~/.claude/keybindings.json` | `global/` | Custom key bindings |
+| MCP config | `~/.claude.json` | `global/claude.json` | MCP server definitions, OAuth tokens, app state |
+| Skills | `~/.claude/skills/` | `skills/` | User-installed skill packages |
+| Plugins | `~/.claude/plugins/` | `plugins/` | Plugin registry (installed_plugins.json, blocklist.json, known_marketplaces.json) |
+| Plans | `~/.claude/plans/` | `plans/` | Saved implementation plans |
+| Custom commands | `~/.claude/commands/` | `commands/` | User-defined slash commands |
+| Todos | `~/.claude/todos/` | `todos/` | Per-session task state |
+| Project memory | `~/.claude/projects/<name>/memory/` | `projects/<name>/memory/` | Auto memory files (MEMORY.md, topic files) |
+| Session transcripts | `~/.claude/projects/<name>/*.jsonl` | `projects/<name>/sessions/` | Session data for `/resume` support |
 
 ## What NOT to Backup
 
-These files contain sensitive or machine-specific data:
+These are excluded because they are sensitive, machine-specific, or regenerated automatically:
 
-| File/Directory | Reason to Exclude |
-|----------------|-------------------|
+| File / Directory | Reason to Exclude |
+|------------------|-------------------|
 | `.credentials.json` | Authentication tokens (regenerated on login) |
-| `history.jsonl` | Chat history (potentially sensitive, very large) |
-| `todos/` | Temporary task tracking data |
+| `history.jsonl` | Chat history -- potentially huge and sensitive |
 | `file-history/` | File operation history |
 | `debug/` | Debug logs and temporary data |
-| `projects/` | Project-specific runtime state |
 | `statsig/`, `Cache/` | Analytics and cache data |
-
-## Platform-Specific Locations
-
-### Windows
-
-```
-C:\Users\<username>\.claude\
-```
-
-Access in Git Bash or WSL:
-```bash
-~/.claude/
-```
-
-### macOS
-
-```
-/Users/<username>/.claude/
-```
-
-Or:
-```bash
-~/.claude/
-```
-
-### Linux
-
-```
-/home/<username>/.claude/
-```
-
-Or:
-```bash
-~/.claude/
-```
+| `plugins/cache/`, `plugins/marketplaces/` | Re-downloaded on next launch |
+| `projects/*` (non-memory, non-session files) | Runtime state, not portable |
 
 ## Quick Start
 
-### 1. Create a Private Backup Repository
+### 1. Clone this guide repository
 
 ```bash
-# Create a new private GitHub repo
-gh repo create claude-code-settings-backup --private
-
-# Create local directory
-mkdir ~/claude-code-settings-backup
-cd ~/claude-code-settings-backup
-git init
-
-# Add .gitignore
-curl -o .gitignore https://raw.githubusercontent.com/jtklinger/claude-code-backup-guide/main/templates/.gitignore
+git clone https://github.com/jtklinger/claude-code-backup-guide.git
+cd claude-code-backup-guide
 ```
 
-### 2. Run the Backup Script
+### 2. Create your private backup repository
 
-Download and run the platform-appropriate backup script:
-
-**Windows (Git Bash/WSL)**:
 ```bash
-curl -o backup.sh https://raw.githubusercontent.com/jtklinger/claude-code-backup-guide/main/scripts/backup.sh
-bash backup.sh
+# Create a new directory for your backups (separate from this guide repo)
+mkdir ~/claude-code-backup
+cd ~/claude-code-backup
 ```
 
-**macOS/Linux**:
+### 3. Run init.sh
+
+The init script scans your `~/.claude/projects/` directory, lets you select which projects to include, and generates `backup-config.json`:
+
 ```bash
-curl -o backup.sh https://raw.githubusercontent.com/jtklinger/claude-code-backup-guide/main/scripts/backup.sh
-chmod +x backup.sh
-./backup.sh
+bash /path/to/claude-code-backup-guide/scripts/init.sh ~/claude-code-backup
 ```
 
-### 3. Commit and Push
+You will see a numbered list of discovered projects. Type `all`, `none`, or specific numbers separated by spaces.
+
+### 4. Run your first backup
 
 ```bash
-git add .
-git commit -m "Initial Claude Code settings backup"
-git remote add origin https://github.com/YOUR_USERNAME/claude-code-settings-backup.git
+bash /path/to/claude-code-backup-guide/scripts/backup.sh ~/claude-code-backup
+```
+
+The script copies all configured data categories, stages changes, and commits automatically.
+
+### 5. Add a remote and push
+
+```bash
+cd ~/claude-code-backup
+git remote add origin git@github.com:YOUR_USER/claude-code-backup.git
 git push -u origin main
 ```
 
-### 4. Restore on New Machine
+### 6. Restore on a new machine
 
 ```bash
-# Clone your backup
-git clone https://github.com/YOUR_USERNAME/claude-code-settings-backup.git
-cd claude-code-settings-backup
+git clone git@github.com:YOUR_USER/claude-code-backup.git
+cd claude-code-backup
 
-# Run restore script
-bash restore.sh
+# Interactive restore (prompts for each category)
+bash /path/to/claude-code-backup-guide/scripts/restore.sh .
+
+# Or non-interactive (restore everything)
+bash /path/to/claude-code-backup-guide/scripts/restore.sh . --yes
 ```
 
 ## Detailed Instructions
 
-### Creating a Backup
+### backup-config.json
 
-#### Step 1: Create Directory Structure
+The config file lives in the root of your backup repository. It controls what gets backed up:
+
+```json
+{
+  "version": 1,
+  "claude_dir": "~/.claude",
+  "include_sessions": true,
+  "include_todos": true,
+  "projects": [
+    "C--Users-me-projects-myproject",
+    "C--Users-me-projects-my-app"
+  ],
+  "git_auto_push": false,
+  "git_remote": "origin",
+  "git_branch": "main"
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `version` | number | Config format version (must be `1`) |
+| `claude_dir` | string | Path to Claude Code data directory (`~` is expanded) |
+| `include_sessions` | boolean | Whether to back up `.jsonl` session transcripts per project |
+| `include_todos` | boolean | Whether to back up per-session todo state |
+| `projects` | string[] | List of project directory names from `~/.claude/projects/` |
+| `git_auto_push` | boolean | Push to remote after each backup commit |
+| `git_remote` | string | Git remote name for auto-push |
+| `git_branch` | string | Git branch name for auto-push |
+
+**Project directory names** use Claude Code's encoding scheme where path separators become dashes (e.g., `C--Users-me-projects-myproject` represents `C:/Users/me/projects/myproject`). The `init.sh` script handles this mapping for you.
+
+### Backup repository layout
+
+After running a backup, your repository will look like this:
+
+```
+claude-code-backup/
+├── backup-config.json
+├── .gitignore
+├── global/
+│   ├── CLAUDE.md
+│   ├── settings.json
+│   ├── settings.local.json
+│   ├── keybindings.json
+│   ├── claude.json              # ~/.claude.json (MCP config + OAuth)
+│   └── PROJECT-CONTEXT.md       # any extra *.md files
+├── skills/
+│   └── <skill-packages>/
+├── plugins/
+│   ├── installed_plugins.json
+│   ├── blocklist.json
+│   └── known_marketplaces.json
+├── plans/
+│   └── <plan>.md
+├── commands/
+│   └── <command>.md
+├── todos/
+│   └── <session-id>.json
+└── projects/
+    └── C--Users-me-projects-myproject/
+        ├── memory/
+        │   ├── MEMORY.md
+        │   └── <topic>.md
+        └── sessions/
+            ├── <session-id>.jsonl
+            └── <session-id>.meta.json
+```
+
+### Script reference
+
+#### init.sh
+
+```
+Usage: bash init.sh [backup-directory]
+```
+
+- Creates the backup directory if it does not exist
+- Initializes a Git repository
+- Copies the `.gitignore` template
+- Scans `~/.claude/projects/` and presents an interactive project selector
+- Generates `backup-config.json`
+- Only needs to be run once (re-run to add new projects)
+
+#### backup.sh
+
+```
+Usage: bash backup.sh [backup-directory]
+```
+
+- Reads `backup-config.json` from the backup directory
+- Copies all data categories (global settings, MCP config, skills, plugins, plans, commands, todos, project data)
+- Only copies files that have changed (uses `cmp` for diffing)
+- Removes stale files from the backup that no longer exist in the source
+- Stages, commits, and optionally pushes
+- Fully non-interactive -- safe for cron or Task Scheduler
+- If no backup-directory argument is provided, assumes the script's parent directory is the backup repo
+
+#### restore.sh
+
+```
+Usage: bash restore.sh [backup-directory] [--yes]
+```
+
+- Reads `backup-config.json` from the backup directory
+- Prompts interactively for each category (global settings, MCP config, skills, plugins, plans, commands, todos, projects)
+- Creates timestamped backups of existing files before overwriting
+- `--yes` flag skips all prompts and restores everything
+- Session files are restored from `sessions/` subdirectory back to the project root (where Claude Code expects them)
+- Prints a verification summary with file counts and sizes
+
+## Scheduling Automatic Backups
+
+Since `backup.sh` is fully non-interactive and auto-commits, it works well as a scheduled task.
+
+### Linux / macOS (cron)
 
 ```bash
-mkdir ~/claude-code-settings-backup
-cd ~/claude-code-settings-backup
-git init
+# Run backup daily at 2:00 AM
+crontab -e
+# Add this line:
+0 2 * * * /path/to/scripts/backup.sh /path/to/claude-code-backup >> /tmp/claude-backup.log 2>&1
 ```
 
-#### Step 2: Create .gitignore
+### Windows (Task Scheduler)
 
-Create a `.gitignore` file to prevent committing sensitive data:
+1. Open Task Scheduler
+2. Create a new task:
+   - **Trigger:** Daily (or at logon, or whatever frequency you prefer)
+   - **Action:** Start a program
+   - **Program:** `C:\Program Files\Git\bin\bash.exe`
+   - **Arguments:** `/path/to/scripts/backup.sh /path/to/claude-code-backup`
 
-```gitignore
-# Never commit actual credentials
-.credentials.json
-*credentials*
-*.key
-*.pem
+### Enabling auto-push
 
-# Temporary files
-*.tmp
-*.bak
-*~
+To push to your remote after every backup, edit `backup-config.json`:
 
-# OS files
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Editor files
-.vscode/
-.idea/
-*.swp
+```json
+{
+  "git_auto_push": true,
+  "git_remote": "origin",
+  "git_branch": "main"
+}
 ```
 
-#### Step 3: Copy Safe Configuration Files
+The backup script will attempt to push after committing. If the push fails, it logs a warning but does not exit with an error.
 
-```bash
-# Copy global instructions
-cp ~/.claude/CLAUDE.md .
+## Security
 
-# Copy basic settings
-cp ~/.claude/settings.json .
-```
+### Your backup repository MUST be private
 
-#### Step 4: Sanitize settings.local.json
+The backup includes `~/.claude.json`, which contains:
 
-**⚠️ CRITICAL**: Never commit passwords or API keys!
+- **MCP server configurations** with connection details
+- **OAuth tokens** for authenticated MCP servers
+- **App state** and other runtime data
 
-Create a sanitized version:
+It also includes `settings.local.json`, which may contain:
 
-```bash
-# Remove passwords and sensitive data
-cat ~/.claude/settings.local.json | \
-  sed 's/password="[^"]*"/password="YOUR_PASSWORD_HERE"/g' | \
-  sed "s/password=''[^'']*''/password=''YOUR_PASSWORD_HERE''/g" | \
-  sed 's/apiKey="[^"]*"/apiKey="YOUR_API_KEY"/g' | \
-  sed 's/token="[^"]*"/token="YOUR_TOKEN"/g' > \
-  settings.local.json.template
-```
-
-#### Step 5: Export MCP Server List
-
-```bash
-# Export current MCP servers (for reference)
-claude mcp list > mcp-servers.txt 2>&1
-```
-
-#### Step 6: Create MCP Restore Script
-
-See [scripts/restore-mcp-template.sh](scripts/restore-mcp-template.sh) for a template.
-
-#### Step 7: Commit to Git
-
-```bash
-git add .
-git commit -m "Backup Claude Code settings"
-git remote add origin YOUR_REPO_URL
-git push -u origin main
-```
-
-### Restoring on a New Machine
-
-#### Step 1: Install Claude Code
-
-Follow the official installation instructions at https://claude.com/claude-code
-
-#### Step 2: Clone Your Backup
-
-```bash
-git clone YOUR_BACKUP_REPO_URL
-cd claude-code-settings-backup
-```
-
-#### Step 3: Restore Basic Settings
-
-```bash
-# Copy global instructions
-cp CLAUDE.md ~/.claude/
-
-# Copy basic settings
-cp settings.json ~/.claude/
-```
-
-#### Step 4: Restore Permissions (Optional)
-
-**Option A: Let Claude Code regenerate (Recommended)**
-- Simply use Claude Code and approve commands as needed
-- Claude Code will build up `settings.local.json` automatically
-- Safest approach
-
-**Option B: Restore manually**
-1. Edit `settings.local.json.template`
-2. Replace placeholders with actual credentials
-3. Rename to `settings.local.json`
-4. Copy to `~/.claude/`
-
-```bash
-# After editing with real credentials
-cp settings.local.json ~/.claude/
-```
-
-#### Step 5: Restore MCP Servers
-
-Review `mcp-servers.txt` for your server list, then:
-
-**Option A: Use the restore script**
-```bash
-# Edit restore-mcp-servers.sh to add credentials
-nano restore-mcp-servers.sh
-
-# Run the script
-bash restore-mcp-servers.sh
-```
-
-**Option B: Add manually**
-```bash
-# Example: Add an SSH MCP server
-claude mcp add -s user --transport stdio my-server -- \
-  npx -y ssh-mcp \
-  --host=server.example.com \
-  --user=myuser \
-  --password="mypassword"
-```
-
-#### Step 6: Verify
-
-```bash
-# Check settings
-cat ~/.claude/CLAUDE.md
-cat ~/.claude/settings.json
-
-# Check MCP servers
-claude mcp list
-```
-
-## Security Best Practices
-
-### 1. Use a Private Repository
-
-Your settings may contain:
-- Infrastructure details (server names, IPs)
-- Permission patterns that reveal your setup
+- Approved command patterns that reveal your infrastructure
 - File paths and directory structures
 
-**Always use a private repository** unless you're sharing only generic templates.
+**Never use a public repository for your backup.**
 
-### 2. Never Commit Credentials
+### Credential handling
 
-Use placeholders in committed files:
-- `YOUR_PASSWORD_HERE` for passwords
-- `YOUR_API_KEY` for API keys
-- `YOUR_TOKEN` for authentication tokens
+Unlike v1, v2 backs up `~/.claude.json` and `settings.local.json` as-is (no sanitization). This is intentional -- sanitized files lose MCP server definitions and cannot be restored without manual reconfiguration.
 
-### 3. Sanitize Before Committing
+The trade-off is clear: **your backup repo is sensitive and must be private.** Treat it like you would a `.env` file or SSH private key.
 
-Always review files before committing:
+### If credentials are exposed
 
-```bash
-# Check for passwords
-grep -i "password" ./* 2>/dev/null
+If you accidentally push to a public repo or your backup repo is compromised:
 
-# Check for API keys
-grep -i "api" ./* 2>/dev/null
+1. **Immediately** rotate all OAuth tokens and passwords in your MCP server configurations
+2. Re-authenticate with Claude Code
+3. Remove the repository from public access
+4. Consider using `git filter-branch` or [BFG Repo-Cleaner](https://rtyley.github.io/bfg-repo-cleaner/) to purge history
 
-# Check for tokens
-grep -i "token" ./* 2>/dev/null
-```
+### SSH keys for Git access
 
-### 4. Use SSH Keys Instead of Passwords
-
-Where possible, configure SSH key-based authentication instead of passwords:
+Use SSH keys (not HTTPS with tokens) for your backup repository remote. This avoids storing additional credentials in your Git config:
 
 ```bash
-# Generate SSH key
-ssh-keygen -t ed25519 -C "claude-code@yourdomain.com"
-
-# Use with MCP server
-claude mcp add -s user --transport stdio my-server -- \
-  npx -y ssh-mcp \
-  --host=server.example.com \
-  --user=myuser \
-  --identity=/path/to/private/key
-```
-
-### 5. Rotate Credentials if Exposed
-
-If you accidentally commit credentials:
-
-1. **Immediately change the credentials** on the affected systems
-2. Remove from Git history:
-   ```bash
-   # Remove file from Git history
-   git filter-branch --force --index-filter \
-     "git rm --cached --ignore-unmatch FILENAME" \
-     --prune-empty --tag-name-filter cat -- --all
-
-   # Force push
-   git push origin --force --all
-   ```
-3. Consider the credentials compromised and rotate them
-
-### 6. Use Environment Variables
-
-For sensitive values, consider using environment variables:
-
-```bash
-# Set environment variable
-export MY_SERVER_PASSWORD="secret"
-
-# Use in MCP server config
-claude mcp add -s user --transport stdio my-server -- \
-  npx -y ssh-mcp \
-  --host=server.example.com \
-  --user=myuser \
-  --password="$MY_SERVER_PASSWORD"
+git remote add origin git@github.com:YOUR_USER/claude-code-backup.git
 ```
 
 ## Troubleshooting
 
-### Settings Not Applying
+### jq not found
 
-**Problem**: Settings don't seem to take effect after restore
+**Problem:** `backup.sh` or `restore.sh` exits with "jq is required but not installed"
 
-**Solution**:
-1. Restart Claude Code completely
-2. Check file permissions: `ls -la ~/.claude/`
-3. Verify file contents: `cat ~/.claude/settings.json`
+**Solution:** Install jq for your platform:
 
-### MCP Servers Not Connecting
-
-**Problem**: MCP servers show as disconnected after restore
-
-**Solutions**:
-1. Verify network connectivity: `ping server.example.com`
-2. Test credentials manually: `ssh user@server.example.com`
-3. Check server status: `claude mcp list`
-4. Review debug logs: `tail -f ~/.claude/debug/*.txt`
-
-### Permissions Not Working
-
-**Problem**: Previously auto-approved commands now require approval
-
-**Solution**:
-- This is expected if you didn't restore `settings.local.json`
-- Simply re-approve commands as you use them
-- Claude Code will rebuild the permissions list
-- Alternatively, restore from `settings.local.json.template`
-
-### Git Won't Clone (Too Large)
-
-**Problem**: Backup repository is very large
-
-**Possible Causes**:
-- Accidentally committed `history.jsonl` (can be hundreds of MB)
-- Committed `debug/` logs
-
-**Solution**:
 ```bash
-# Remove large files from history
-git filter-branch --force --index-filter \
-  "git rm --cached --ignore-unmatch history.jsonl" \
-  --prune-empty --tag-name-filter cat -- --all
+# macOS
+brew install jq
 
-# Force push
-git push origin --force --all
+# Debian/Ubuntu
+sudo apt install jq
+
+# RHEL/Rocky/Fedora
+sudo dnf install jq
+
+# Windows (winget)
+winget install jqlang.jq
+
+# Windows (scoop)
+scoop install jq
 ```
 
-### Different Behavior on New Machine
+### Session files are very large
 
-**Problem**: Claude Code behaves differently after restore
+**Problem:** Backup repository grows quickly due to `.jsonl` session transcripts
 
-**Possible Reasons**:
-1. Different Claude Code version
-2. Different OS/platform
-3. Project-specific settings (not backed up)
-4. Local environment differences
+**Solution:** Disable session backup if you do not need `/resume` support across machines:
 
-**Check**:
+```json
+{
+  "include_sessions": false
+}
+```
+
+Or periodically clean old sessions from the backup:
+
 ```bash
-# Verify Claude Code version
-claude --version
+# Remove session files older than 30 days from the backup
+find ~/claude-code-backup/projects/*/sessions/ -name "*.jsonl" -mtime +30 -delete
+```
 
-# Compare settings
-diff ~/.claude/settings.json ~/claude-code-settings-backup/settings.json
+### Memory files not restoring
+
+**Problem:** Per-project memory (MEMORY.md, topic files) not appearing after restore
+
+**Solutions:**
+
+1. Verify the project is listed in `backup-config.json` under `projects`
+2. Check that the project directory name matches exactly (case-sensitive)
+3. Restart Claude Code after restoring -- memory files are read on startup
+4. Verify the files exist: `ls ~/.claude/projects/<project-name>/memory/`
+
+### Settings not applying after restore
+
+**Problem:** Settings do not take effect after running restore.sh
+
+**Solution:**
+
+1. Restart Claude Code completely (quit and relaunch)
+2. Check file permissions: `ls -la ~/.claude/`
+3. Verify file contents: `cat ~/.claude/settings.json`
+4. Check for `.backup.*` files that may indicate the restore created backups of conflicting files
+
+### MCP servers not connecting after restore
+
+**Problem:** MCP servers show as disconnected after restoring `~/.claude.json`
+
+**Solutions:**
+
+1. OAuth tokens in `~/.claude.json` may have expired -- re-authenticate with the affected services
+2. Verify network connectivity to the MCP server endpoints
+3. Check that any local dependencies (npm packages, binaries) are installed on the new machine
+4. Run `claude mcp list` to see the current status
+
+### Backup script reports no changes
+
+**Problem:** `backup.sh` says "No changes detected" even though you changed settings
+
+**Solution:** The script compares files byte-for-byte using `cmp`. If the files are identical, no commit is created. Verify the source files actually changed:
+
+```bash
+diff ~/.claude/settings.json ~/claude-code-backup/global/settings.json
 ```
 
 ## FAQ
 
-### Q: Do I need to backup chat history?
+### Q: How is v2 different from v1?
 
-**A**: Usually not. Chat history (`history.jsonl`) can be very large and may contain sensitive information. If you want to preserve important conversations, export them individually rather than backing up the entire history file.
+**A:** v1 backed up only CLAUDE.md, settings.json, settings.local.json, and a text dump of MCP servers. v2 is a config-driven system that backs up the complete Claude Code data model: memory, skills, plugins, plans, commands, keybindings, the full `~/.claude.json`, session transcripts, and todos. It uses three purpose-built scripts (init, backup, restore) instead of manual copy commands.
+
+### Q: Do I need to back up chat history?
+
+**A:** No. Chat history (`history.jsonl`) is excluded intentionally -- it can be hundreds of megabytes and contains the full text of every conversation. If you need to preserve specific conversations, export them individually. Session transcripts (`.jsonl` in project directories) are a different thing and are backed up for `/resume` support.
 
 ### Q: Can I share my backup repo publicly?
 
-**A**: Only if you:
-- Remove all credentials and sensitive data
-- Remove all server names, IPs, and infrastructure details
-- Keep only generic templates and instructions
+**A:** No. v2 backs up `~/.claude.json` which contains OAuth tokens and MCP server credentials. Your backup repository must be private. If you want to share your CLAUDE.md or settings as a template, copy those specific files into a separate public repository.
 
-Otherwise, use a **private repository**.
+### Q: How often should I back up?
 
-### Q: How often should I backup?
-
-**A**: Backup when you make significant changes:
-- Add new MCP servers
-- Update global instructions (CLAUDE.md)
-- Configure new permissions
-- Change important settings
-
-Consider creating a cron job or scheduled task for automatic backups.
+**A:** Set up a cron job or Task Scheduler task to run `backup.sh` daily. The script is idempotent -- if nothing changed, no commit is created. For critical changes (new MCP servers, major CLAUDE.md updates), run a manual backup immediately.
 
 ### Q: Can I use this for team settings?
 
-**A**: Yes! Create a shared private repository with:
-- Team-wide global instructions
-- Common MCP server configurations (without credentials)
-- Shared permission patterns
-- Team coding standards
-
-Each team member clones and adds their own credentials locally.
+**A:** Partially. You can share CLAUDE.md, plans, commands, and skills through a shared private repository. However, `~/.claude.json` and `settings.local.json` contain per-user credentials and should not be shared. Consider maintaining a team template repo alongside individual backup repos.
 
 ### Q: What about project-specific CLAUDE.md files?
 
-**A**: Project-specific `CLAUDE.md` files should be committed to the project repository, not your settings backup. They're meant to be shared with the team.
+**A:** Project-specific `CLAUDE.md` files live in the project's own repository root and should be committed there, not in your settings backup. This guide backs up per-project *memory* (auto-generated context) and *sessions* (for `/resume`), which live under `~/.claude/projects/`.
 
 ### Q: Will this work across different OS platforms?
 
-**A**: Settings files are platform-agnostic. However:
-- File paths may differ
-- Some MCP servers may be OS-specific
-- Test after restoring on a different platform
+**A:** The settings files themselves are platform-agnostic. However, project directory names encode the full path (e.g., `C--Users-me-projects-myproject`), so a backup from Windows will have Windows-style encoded paths. If restoring on macOS/Linux, you may need to update the `projects` list in `backup-config.json` to match the new machine's paths.
 
-### Q: Can I automate backups?
+### Q: Can I add new projects after initial setup?
 
-**A**: Yes! See [scripts/auto-backup.sh](scripts/auto-backup.sh) for an example script you can run via cron or Task Scheduler.
+**A:** Yes. Either re-run `init.sh` (it will ask before overwriting the config), or manually edit `backup-config.json` and add the project directory name to the `projects` array. Find directory names with `ls ~/.claude/projects/`.
+
+### Q: What happens to existing files during restore?
+
+**A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version.
 
 ## Additional Resources
 
-- [Claude Code Documentation](https://docs.claude.com/claude-code)
-- [Backup Script Template](scripts/backup.sh)
-- [Restore Script Template](scripts/restore.sh)
-- [MCP Server Restore Template](scripts/restore-mcp-template.sh)
-- [Example .gitignore](templates/.gitignore)
+- [Backup Script](scripts/backup.sh)
+- [Restore Script](scripts/restore.sh)
+- [Init Script](scripts/init.sh)
+- [.gitignore Template](templates/.gitignore)
+- [backup-config.json Template](templates/backup-config.json)
 
 ## Contributing
 
@@ -541,11 +450,3 @@ Found an issue or have an improvement? Please:
 ## License
 
 MIT License - Feel free to use and modify as needed.
-
-## Acknowledgments
-
-Created by the Claude Code community to help users maintain their settings across machines.
-
----
-
-**⚠️ Remember**: Never commit real passwords or API keys to Git, even in private repositories!
