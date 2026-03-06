@@ -1,230 +1,505 @@
 #!/bin/bash
 
-# Claude Code Settings Backup Script
+# Claude Code Settings Backup Script v2
 #
-# This script backs up your Claude Code settings to a Git repository
-# while sanitizing sensitive data like passwords and API keys.
+# Config-driven backup of all Claude Code data categories.
+# Reads backup-config.json from the repo root and backs up
+# settings, MCP config, skills, plugins, plans, commands,
+# todos, and per-project data.
 #
 # Usage: bash backup.sh [backup-directory]
 #
-# Example: bash backup.sh ~/claude-code-settings-backup
+# Fully non-interactive — safe for cron.
 
-set -e  # Exit on error
+set -e
 
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Default backup directory
-BACKUP_DIR="${1:-$HOME/claude-code-settings-backup}"
-CLAUDE_DIR="$HOME/.claude"
+# Global state
+CHANGES_MADE=false
+COUNTS_GLOBAL=0
+COUNTS_MCP=0
+COUNTS_SKILLS=0
+COUNTS_PLUGINS=0
+COUNTS_PLANS=0
+COUNTS_COMMANDS=0
+COUNTS_TODOS=0
+COUNTS_PROJECTS=0
 
-echo -e "${GREEN}Claude Code Settings Backup Script${NC}"
-echo "===================================="
-echo ""
-
-# Check if Claude Code directory exists
-if [ ! -d "$CLAUDE_DIR" ]; then
-    echo -e "${RED}Error: Claude Code directory not found at $CLAUDE_DIR${NC}"
-    echo "Please ensure Claude Code is installed."
-    exit 1
-fi
-
-# Create backup directory if it doesn't exist
-if [ ! -d "$BACKUP_DIR" ]; then
-    echo -e "${YELLOW}Creating backup directory: $BACKUP_DIR${NC}"
-    mkdir -p "$BACKUP_DIR"
-fi
-
-cd "$BACKUP_DIR"
-
-# Initialize git if not already initialized
-if [ ! -d ".git" ]; then
-    echo -e "${YELLOW}Initializing Git repository...${NC}"
-    git init
-    echo ""
-fi
-
-# Create .gitignore if it doesn't exist
-if [ ! -f ".gitignore" ]; then
-    echo -e "${YELLOW}Creating .gitignore...${NC}"
-    cat > .gitignore << 'EOF'
-# Never commit actual credentials
-.credentials.json
-*credentials*
-*.key
-*.pem
-
-# Temporary files
-*.tmp
-*.bak
-*~
-
-# OS files
-.DS_Store
-Thumbs.db
-desktop.ini
-
-# Editor files
-.vscode/
-.idea/
-*.swp
-*.swo
-EOF
-    echo "Created .gitignore"
-    echo ""
-fi
-
-# Backup CLAUDE.md
-if [ -f "$CLAUDE_DIR/CLAUDE.md" ]; then
-    echo -e "${GREEN}✓ Backing up CLAUDE.md${NC}"
-    cp "$CLAUDE_DIR/CLAUDE.md" .
-else
-    echo -e "${YELLOW}⚠ CLAUDE.md not found (this is okay if you haven't created one)${NC}"
-fi
-
-# Backup settings.json
-if [ -f "$CLAUDE_DIR/settings.json" ]; then
-    echo -e "${GREEN}✓ Backing up settings.json${NC}"
-    cp "$CLAUDE_DIR/settings.json" .
-else
-    echo -e "${YELLOW}⚠ settings.json not found${NC}"
-fi
-
-# Backup and sanitize settings.local.json
-if [ -f "$CLAUDE_DIR/settings.local.json" ]; then
-    echo -e "${GREEN}✓ Backing up settings.local.json (sanitized)${NC}"
-
-    # Sanitize passwords, API keys, and tokens
-    cat "$CLAUDE_DIR/settings.local.json" | \
-        sed 's/password="[^"]*"/password="YOUR_PASSWORD_HERE"/g' | \
-        sed "s/password=''[^'']*''/password=''YOUR_PASSWORD_HERE''/g" | \
-        sed "s/password='[^']*'/password='YOUR_PASSWORD_HERE'/g" | \
-        sed 's/apiKey="[^"]*"/apiKey="YOUR_API_KEY"/g' | \
-        sed 's/token="[^"]*"/token="YOUR_TOKEN"/g' | \
-        sed 's/secret="[^"]*"/secret="YOUR_SECRET"/g' | \
-        sed 's/key="[^"]*"/key="YOUR_KEY"/g' > \
-        settings.local.json.template
-
-    echo -e "${YELLOW}  → Saved as settings.local.json.template (passwords removed)${NC}"
-else
-    echo -e "${YELLOW}⚠ settings.local.json not found${NC}"
-fi
-
-# Export MCP server list
-echo -e "${GREEN}✓ Exporting MCP server list${NC}"
-if command -v claude &> /dev/null; then
-    claude mcp list > mcp-servers.txt 2>&1 || true
-    echo "  → Saved to mcp-servers.txt"
-else
-    echo -e "${YELLOW}  → Claude CLI not found, skipping MCP server export${NC}"
-fi
-
-# Create README if it doesn't exist
-if [ ! -f "README.md" ]; then
-    echo -e "${YELLOW}Creating README.md...${NC}"
-    cat > README.md << 'EOF'
-# Claude Code Settings Backup
-
-This repository contains a backup of Claude Code settings.
-
-## What's Included
-
-- `CLAUDE.md` - Global instructions for Claude Code
-- `settings.json` - Basic Claude Code settings
-- `settings.local.json.template` - Permission templates (passwords removed)
-- `mcp-servers.txt` - List of configured MCP servers
-
-## Restoration
-
-See the [Claude Code Backup Guide](https://github.com/jtklinger/claude-code-backup-guide) for complete instructions.
-
-### Quick Restore
-
-```bash
-# Copy settings files
-cp CLAUDE.md ~/.claude/
-cp settings.json ~/.claude/
-
-# Restore MCP servers (after editing with real credentials)
-# See mcp-servers.txt for the list of servers to configure
-```
-
-## Security
-
-⚠️ **IMPORTANT**: This backup has passwords removed for security.
-- Never commit real passwords to Git
-- Edit templates locally with real credentials when restoring
-- Keep this repository private
-
-## Last Updated
-
-$(date '+%Y-%m-%d %H:%M:%S')
-EOF
-    echo "Created README.md"
-fi
-
-echo ""
-echo -e "${GREEN}Backup Summary${NC}"
-echo "=============="
-echo "Backup location: $BACKUP_DIR"
-echo ""
-echo "Files backed up:"
-ls -lh CLAUDE.md settings.json settings.local.json.template mcp-servers.txt 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
-echo ""
-
-# Check for sensitive data
-echo -e "${YELLOW}Security Check${NC}"
-echo "==============="
-
-# Function to check for patterns
-check_sensitive() {
-    local pattern=$1
-    local description=$2
-    local count=$(grep -i "$pattern" ./* 2>/dev/null | grep -v "YOUR_" | grep -v ".sh" | wc -l)
-
-    if [ $count -gt 0 ]; then
-        echo -e "${RED}⚠ Found $count potential $description in files!${NC}"
-        echo "  Please review before committing."
-        return 1
-    else
-        echo -e "${GREEN}✓ No $description found${NC}"
-        return 0
-    fi
+# Timestamp for log lines
+log_ts() {
+    date '+%Y-%m-%d %H:%M:%S'
 }
 
-all_clear=true
-check_sensitive "password=" "passwords" || all_clear=false
-check_sensitive "apiKey=" "API keys" || all_clear=false
-check_sensitive "token=" "tokens" || all_clear=false
+log_info() {
+    echo -e "[$(log_ts)] ${GREEN}$1${NC}"
+}
 
-echo ""
+log_warn() {
+    echo -e "[$(log_ts)] ${YELLOW}$1${NC}"
+}
 
-if $all_clear; then
-    echo -e "${GREEN}✓ Security check passed!${NC}"
-    echo ""
-    echo "Next steps:"
-    echo "  1. Review the files in $BACKUP_DIR"
-    echo "  2. Commit to Git:"
-    echo "     cd $BACKUP_DIR"
-    echo "     git add ."
-    echo "     git commit -m 'Backup Claude Code settings'"
-    echo "  3. Push to your private repository"
-else
-    echo -e "${RED}⚠ Security check found potential issues!${NC}"
-    echo "Please review the files before committing."
-    echo ""
-    echo "Common issues:"
-    echo "  - Passwords not properly sanitized"
-    echo "  - API keys or tokens still present"
-    echo "  - Secrets in permission patterns"
-    echo ""
-    echo "Review with:"
-    echo "  grep -i 'password' $BACKUP_DIR/*"
-    echo "  grep -i 'apiKey' $BACKUP_DIR/*"
-fi
+log_error() {
+    echo -e "[$(log_ts)] ${RED}$1${NC}"
+}
 
-echo ""
-echo -e "${GREEN}Backup complete!${NC}"
+# ─── Helper Functions ───────────────────────────────────────────────
+
+parse_config() {
+    local config_file="$BACKUP_DIR/backup-config.json"
+
+    if ! command -v jq &>/dev/null; then
+        log_error "jq is required but not installed. Please install jq first."
+        exit 1
+    fi
+
+    if [ ! -f "$config_file" ]; then
+        log_error "Config file not found: $config_file"
+        log_error "Run init.sh first to create backup-config.json"
+        exit 1
+    fi
+
+    local version
+    version=$(jq -r '.version // empty' "$config_file")
+    if [ "$version" != "1" ]; then
+        log_error "Unsupported config version: ${version:-missing}. Expected version 1."
+        exit 1
+    fi
+
+    # Read config values
+    CLAUDE_DIR=$(jq -r '.claude_dir // "~/.claude"' "$config_file")
+    INCLUDE_SESSIONS=$(jq -r '.include_sessions // true' "$config_file")
+    INCLUDE_TODOS=$(jq -r '.include_todos // true' "$config_file")
+    GIT_AUTO_PUSH=$(jq -r '.git_auto_push // false' "$config_file")
+    GIT_REMOTE=$(jq -r '.git_remote // "origin"' "$config_file")
+    GIT_BRANCH=$(jq -r '.git_branch // "main"' "$config_file")
+
+    # Read projects array
+    PROJECTS=()
+    while IFS= read -r proj; do
+        [ -n "$proj" ] && PROJECTS+=("$proj")
+    done < <(jq -r '.projects[]? // empty' "$config_file")
+
+    # Expand ~ to $HOME in claude_dir
+    CLAUDE_DIR="${CLAUDE_DIR/#\~/$HOME}"
+
+    log_info "Config loaded: claude_dir=$CLAUDE_DIR, ${#PROJECTS[@]} project(s)"
+}
+
+copy_if_changed() {
+    local source="$1"
+    local dest="$2"
+
+    if [ ! -e "$source" ]; then
+        log_warn "Source not found, skipping: $source"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$dest")"
+
+    if [ -f "$dest" ] && cmp -s "$source" "$dest"; then
+        return 0
+    fi
+
+    cp "$source" "$dest"
+    CHANGES_MADE=true
+    return 0
+}
+
+sync_directory() {
+    local source_dir="$1"
+    local dest_dir="$2"
+    local file_glob="${3:-*}"
+    local copied=0
+
+    if [ ! -d "$source_dir" ]; then
+        return 0
+    fi
+
+    mkdir -p "$dest_dir"
+
+    # Copy new/changed files
+    local found_files=false
+    while IFS= read -r -d '' src_file; do
+        found_files=true
+        local rel_path="${src_file#$source_dir/}"
+        local dest_file="$dest_dir/$rel_path"
+        mkdir -p "$(dirname "$dest_file")"
+        if [ ! -f "$dest_file" ] || ! cmp -s "$src_file" "$dest_file"; then
+            cp "$src_file" "$dest_file"
+            CHANGES_MADE=true
+            ((copied++)) || true
+        fi
+    done < <(find "$source_dir" -type f -name "$file_glob" -print0 2>/dev/null)
+
+    # Remove stale files from dest that no longer exist in source
+    if [ -d "$dest_dir" ]; then
+        while IFS= read -r -d '' dest_file; do
+            local rel_path="${dest_file#$dest_dir/}"
+            local src_file="$source_dir/$rel_path"
+            if [ ! -f "$src_file" ]; then
+                rm -f "$dest_file"
+                CHANGES_MADE=true
+            fi
+        done < <(find "$dest_dir" -type f -name "$file_glob" -print0 2>/dev/null)
+    fi
+
+    echo "$copied"
+}
+
+# ─── Backup Functions ───────────────────────────────────────────────
+
+backup_global_settings() {
+    log_info "Backing up global settings..."
+    local count=0
+    local dest_dir="$BACKUP_DIR/global"
+    mkdir -p "$dest_dir"
+
+    # Back up all *.md files from claude_dir (CLAUDE.md, HOMELAB-CONTEXT.md, etc.)
+    if ls "$CLAUDE_DIR"/*.md &>/dev/null; then
+        for md_file in "$CLAUDE_DIR"/*.md; do
+            local basename
+            basename=$(basename "$md_file")
+            copy_if_changed "$md_file" "$dest_dir/$basename"
+            ((count++)) || true
+        done
+    fi
+
+    # Specific JSON config files
+    for f in settings.json settings.local.json keybindings.json; do
+        if [ -f "$CLAUDE_DIR/$f" ]; then
+            copy_if_changed "$CLAUDE_DIR/$f" "$dest_dir/$f"
+            ((count++)) || true
+        fi
+    done
+
+    # Remove stale *.md files from dest that no longer exist in source
+    if ls "$dest_dir"/*.md &>/dev/null; then
+        for dest_md in "$dest_dir"/*.md; do
+            local basename
+            basename=$(basename "$dest_md")
+            if [ ! -f "$CLAUDE_DIR/$basename" ]; then
+                rm -f "$dest_md"
+                CHANGES_MADE=true
+            fi
+        done
+    fi
+
+    COUNTS_GLOBAL=$count
+    log_info "  Global settings: $count file(s) processed"
+}
+
+backup_mcp_config() {
+    log_info "Backing up MCP config..."
+    local count=0
+    local dest_dir="$BACKUP_DIR/global"
+    mkdir -p "$dest_dir"
+
+    # ~/.claude.json lives in HOME, not inside ~/.claude/
+    if [ -f "$HOME/.claude.json" ]; then
+        copy_if_changed "$HOME/.claude.json" "$dest_dir/claude.json"
+        ((count++)) || true
+    else
+        log_warn "  ~/.claude.json not found (no MCP config to back up)"
+    fi
+
+    COUNTS_MCP=$count
+    log_info "  MCP config: $count file(s) processed"
+}
+
+backup_skills() {
+    log_info "Backing up skills..."
+    local source_dir="$CLAUDE_DIR/skills"
+    local dest_dir="$BACKUP_DIR/skills"
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  Skills directory not found, skipping"
+        return 0
+    fi
+
+    # Prefer rsync if available (excludes .git, handles deletes)
+    if command -v rsync &>/dev/null; then
+        local rsync_out
+        rsync_out=$(rsync -ai --delete --exclude='.git' "$source_dir/" "$dest_dir/" 2>&1) || true
+        # rsync -i prints itemized changes; if output is non-empty, something changed
+        if [ -n "$rsync_out" ]; then
+            CHANGES_MADE=true
+        fi
+    else
+        # Manual sync fallback — copy all files excluding .git
+        mkdir -p "$dest_dir"
+        local copied=0
+        while IFS= read -r -d '' src_file; do
+            local rel_path="${src_file#$source_dir/}"
+            local dest_file="$dest_dir/$rel_path"
+            mkdir -p "$(dirname "$dest_file")"
+            if [ ! -f "$dest_file" ] || ! cmp -s "$src_file" "$dest_file"; then
+                cp "$src_file" "$dest_file"
+                CHANGES_MADE=true
+                ((copied++)) || true
+            fi
+        done < <(find "$source_dir" -type f -not -path '*/.git/*' -print0 2>/dev/null)
+
+        # Remove stale files
+        if [ -d "$dest_dir" ]; then
+            while IFS= read -r -d '' dest_file; do
+                local rel_path="${dest_file#$dest_dir/}"
+                if [ ! -f "$source_dir/$rel_path" ]; then
+                    rm -f "$dest_file"
+                    CHANGES_MADE=true
+                fi
+            done < <(find "$dest_dir" -type f -not -path '*/.git/*' -print0 2>/dev/null)
+        fi
+    fi
+
+    local file_count=0
+    if [ -d "$dest_dir" ]; then
+        file_count=$(find "$dest_dir" -type f 2>/dev/null | wc -l)
+    fi
+    COUNTS_SKILLS=$file_count
+    log_info "  Skills: $file_count file(s)"
+}
+
+backup_plugins() {
+    log_info "Backing up plugins..."
+    local count=0
+    local source_dir="$CLAUDE_DIR/plugins"
+    local dest_dir="$BACKUP_DIR/plugins"
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  Plugins directory not found, skipping"
+        return 0
+    fi
+
+    mkdir -p "$dest_dir"
+
+    # Only back up specific config files, NOT cache/ or marketplaces/
+    for f in installed_plugins.json blocklist.json known_marketplaces.json; do
+        if [ -f "$source_dir/$f" ]; then
+            copy_if_changed "$source_dir/$f" "$dest_dir/$f"
+            ((count++)) || true
+        fi
+    done
+
+    COUNTS_PLUGINS=$count
+    log_info "  Plugins: $count file(s) processed"
+}
+
+backup_plans() {
+    log_info "Backing up plans..."
+    local source_dir="$CLAUDE_DIR/plans"
+    local dest_dir="$BACKUP_DIR/plans"
+
+    if [ ! -d "$source_dir" ] || [ -z "$(ls -A "$source_dir"/*.md 2>/dev/null)" ]; then
+        log_warn "  Plans directory empty or missing, skipping"
+        return 0
+    fi
+
+    local count
+    count=$(sync_directory "$source_dir" "$dest_dir" "*.md")
+    COUNTS_PLANS=$(find "$dest_dir" -type f -name "*.md" 2>/dev/null | wc -l)
+    log_info "  Plans: $COUNTS_PLANS file(s)"
+}
+
+backup_commands() {
+    log_info "Backing up commands..."
+    local source_dir="$CLAUDE_DIR/commands"
+    local dest_dir="$BACKUP_DIR/commands"
+
+    if [ ! -d "$source_dir" ] || [ -z "$(ls -A "$source_dir"/*.md 2>/dev/null)" ]; then
+        log_warn "  Commands directory empty or missing, skipping"
+        return 0
+    fi
+
+    local count
+    count=$(sync_directory "$source_dir" "$dest_dir" "*.md")
+    COUNTS_COMMANDS=$(find "$dest_dir" -type f -name "*.md" 2>/dev/null | wc -l)
+    log_info "  Commands: $COUNTS_COMMANDS file(s)"
+}
+
+backup_todos() {
+    if [ "$INCLUDE_TODOS" != "true" ]; then
+        log_info "Skipping todos (disabled in config)"
+        return 0
+    fi
+
+    log_info "Backing up todos..."
+    local source_dir="$CLAUDE_DIR/todos"
+    local dest_dir="$BACKUP_DIR/todos"
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  Todos directory not found, skipping"
+        return 0
+    fi
+
+    local count
+    count=$(sync_directory "$source_dir" "$dest_dir" "*.json")
+    COUNTS_TODOS=$(find "$dest_dir" -type f -name "*.json" 2>/dev/null | wc -l)
+    log_info "  Todos: $COUNTS_TODOS file(s)"
+}
+
+backup_projects() {
+    if [ ${#PROJECTS[@]} -eq 0 ]; then
+        log_info "No projects configured, skipping project backup"
+        return 0
+    fi
+
+    log_info "Backing up ${#PROJECTS[@]} project(s)..."
+    local total_count=0
+
+    for project in "${PROJECTS[@]}"; do
+        local source_dir="$CLAUDE_DIR/projects/$project"
+        local dest_base="$BACKUP_DIR/projects/$project"
+
+        if [ ! -d "$source_dir" ]; then
+            log_warn "  Project not found, skipping: $project"
+            continue
+        fi
+
+        log_info "  Project: $project"
+
+        # Copy memory files
+        if [ -d "$source_dir/memory" ]; then
+            local mem_count
+            mem_count=$(sync_directory "$source_dir/memory" "$dest_base/memory")
+            local mem_files
+            mem_files=$(find "$dest_base/memory" -type f 2>/dev/null | wc -l)
+            ((total_count += mem_files)) || true
+            log_info "    Memory: $mem_files file(s)"
+        fi
+
+        # Copy session files if enabled
+        if [ "$INCLUDE_SESSIONS" = "true" ]; then
+            local sessions_dest="$dest_base/sessions"
+            mkdir -p "$sessions_dest"
+
+            local session_count=0
+            # Copy *.jsonl files
+            if ls "$source_dir"/*.jsonl &>/dev/null; then
+                for src_file in "$source_dir"/*.jsonl; do
+                    local basename
+                    basename=$(basename "$src_file")
+                    copy_if_changed "$src_file" "$sessions_dest/$basename"
+                    ((session_count++)) || true
+                done
+            fi
+
+            # Copy *.meta.json files alongside sessions
+            if ls "$source_dir"/*.meta.json &>/dev/null; then
+                for src_file in "$source_dir"/*.meta.json; do
+                    local basename
+                    basename=$(basename "$src_file")
+                    copy_if_changed "$src_file" "$sessions_dest/$basename"
+                    ((session_count++)) || true
+                done
+            fi
+
+            # Remove stale session files
+            if [ -d "$sessions_dest" ]; then
+                while IFS= read -r -d '' dest_file; do
+                    local basename
+                    basename=$(basename "$dest_file")
+                    if [ ! -f "$source_dir/$basename" ]; then
+                        rm -f "$dest_file"
+                        CHANGES_MADE=true
+                    fi
+                done < <(find "$sessions_dest" -type f \( -name "*.jsonl" -o -name "*.meta.json" \) -print0 2>/dev/null)
+            fi
+
+            ((total_count += session_count)) || true
+            log_info "    Sessions: $session_count file(s)"
+        fi
+    done
+
+    COUNTS_PROJECTS=$total_count
+    log_info "  Projects total: $total_count file(s)"
+}
+
+# ─── Main Flow ──────────────────────────────────────────────────────
+
+main() {
+    # Determine BACKUP_DIR: $1 or parent of script directory (repo root)
+    if [ -n "$1" ]; then
+        BACKUP_DIR="$1"
+    else
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        BACKUP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    fi
+
+    echo -e "${GREEN}Claude Code Backup Script v2${NC}"
+    echo "=============================="
+    echo ""
+
+    # Parse config
+    parse_config
+
+    # Run all backup functions
+    backup_global_settings
+    backup_mcp_config
+    backup_skills
+    backup_plugins
+    backup_plans
+    backup_commands
+    backup_todos
+    backup_projects
+
+    echo ""
+    log_info "Backup Summary"
+    echo "  Global settings: $COUNTS_GLOBAL"
+    echo "  MCP config:      $COUNTS_MCP"
+    echo "  Skills:           $COUNTS_SKILLS"
+    echo "  Plugins:          $COUNTS_PLUGINS"
+    echo "  Plans:            $COUNTS_PLANS"
+    echo "  Commands:         $COUNTS_COMMANDS"
+    echo "  Todos:            $COUNTS_TODOS"
+    echo "  Projects:         $COUNTS_PROJECTS"
+    echo ""
+
+    # Git operations
+    cd "$BACKUP_DIR"
+
+    if [ ! -d ".git" ]; then
+        log_warn "Not a git repository, skipping git operations"
+        return 0
+    fi
+
+    # Stage specific backup directories (only dirs that might exist)
+    for dir in global skills plugins plans commands todos projects; do
+        if [ -d "$BACKUP_DIR/$dir" ]; then
+            git add "$BACKUP_DIR/$dir" 2>/dev/null || true
+        fi
+    done
+
+    # Check if there are staged changes
+    if git diff --cached --quiet 2>/dev/null; then
+        log_info "No changes detected, nothing to commit"
+    else
+        local timestamp
+        timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        git commit -m "Backup Claude Code settings -- $timestamp"
+        log_info "Changes committed"
+
+        if [ "$GIT_AUTO_PUSH" = "true" ]; then
+            log_info "Pushing to $GIT_REMOTE/$GIT_BRANCH..."
+            if git push "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null; then
+                log_info "Push successful"
+            elif git push "$GIT_REMOTE" master 2>/dev/null; then
+                log_warn "Pushed to master (configured branch '$GIT_BRANCH' failed)"
+            else
+                log_error "Push failed -- please push manually"
+            fi
+        fi
+    fi
+
+    # Final summary
+    echo ""
+    local last_hash
+    last_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "N/A")
+    log_info "Backup complete. Last commit: $last_hash"
+}
+
+main "$@"
