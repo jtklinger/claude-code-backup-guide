@@ -1,195 +1,579 @@
 #!/bin/bash
 
-# Claude Code Settings Restore Script
+# Claude Code Settings Restore Script v2
 #
-# This script restores your Claude Code settings from a backup repository.
+# Config-driven restore of all Claude Code data categories.
+# Reads backup-config.json from the repo root and restores
+# settings, MCP config, skills, plugins, plans, commands,
+# todos, and per-project data with interactive prompts.
 #
-# Usage: bash restore.sh [backup-directory]
+# Usage: bash restore.sh [backup-directory] [--yes]
 #
-# Example: bash restore.sh ~/claude-code-settings-backup
+# Options:
+#   --yes    Non-interactive mode (skip all prompts, restore everything)
 
-set -e  # Exit on error
+set -e
 
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Backup directory (default to current directory)
-BACKUP_DIR="${1:-.}"
-CLAUDE_DIR="$HOME/.claude"
+# Global state
+AUTO_YES=false
+RESTORED_FILES=()
+RESTORED_DIRS=()
 
-echo -e "${GREEN}Claude Code Settings Restore Script${NC}"
-echo "====================================="
-echo ""
+# Timestamp for log lines
+log_ts() {
+    date '+%Y-%m-%d %H:%M:%S'
+}
 
-# Check if backup directory exists
-if [ ! -d "$BACKUP_DIR" ]; then
-    echo -e "${RED}Error: Backup directory not found: $BACKUP_DIR${NC}"
-    exit 1
-fi
+log_info() {
+    echo -e "[$(log_ts)] ${GREEN}$1${NC}"
+}
 
-cd "$BACKUP_DIR"
+log_warn() {
+    echo -e "[$(log_ts)] ${YELLOW}$1${NC}"
+}
 
-# Create Claude directory if it doesn't exist
-if [ ! -d "$CLAUDE_DIR" ]; then
-    echo -e "${YELLOW}Creating Claude Code directory: $CLAUDE_DIR${NC}"
-    mkdir -p "$CLAUDE_DIR"
-fi
+log_error() {
+    echo -e "[$(log_ts)] ${RED}$1${NC}"
+}
 
-echo -e "${BLUE}Backup directory: $BACKUP_DIR${NC}"
-echo -e "${BLUE}Claude directory: $CLAUDE_DIR${NC}"
-echo ""
+log_detail() {
+    echo -e "[$(log_ts)] ${BLUE}$1${NC}"
+}
 
-# Function to backup existing file
+# ─── Helper Functions ───────────────────────────────────────────────
+
+parse_config() {
+    local config_file="$BACKUP_DIR/backup-config.json"
+
+    if ! command -v jq &>/dev/null; then
+        log_error "jq is required but not installed. Please install jq first."
+        exit 1
+    fi
+
+    if [ ! -f "$config_file" ]; then
+        log_error "Config file not found: $config_file"
+        log_error "This does not appear to be a valid backup repository."
+        exit 1
+    fi
+
+    local version
+    version=$(jq -r '.version // empty' "$config_file")
+    if [ "$version" != "1" ]; then
+        log_error "Unsupported config version: ${version:-missing}. Expected version 1."
+        exit 1
+    fi
+
+    # Read config values
+    CLAUDE_DIR=$(jq -r '.claude_dir // "~/.claude"' "$config_file")
+    INCLUDE_SESSIONS=$(jq -r '.include_sessions // true' "$config_file")
+    INCLUDE_TODOS=$(jq -r '.include_todos // true' "$config_file")
+
+    # Read projects array
+    PROJECTS=()
+    while IFS= read -r proj; do
+        [ -n "$proj" ] && PROJECTS+=("$proj")
+    done < <(jq -r '.projects[]? // empty' "$config_file")
+
+    # Expand ~ to $HOME in claude_dir
+    CLAUDE_DIR="${CLAUDE_DIR/#\~/$HOME}"
+
+    log_info "Config loaded: claude_dir=$CLAUDE_DIR, ${#PROJECTS[@]} project(s)"
+}
+
 backup_existing() {
-    local file=$1
-    if [ -f "$CLAUDE_DIR/$file" ]; then
-        local backup_name="$file.backup.$(date +%Y%m%d_%H%M%S)"
-        echo -e "${YELLOW}  → Backing up existing $file to $backup_name${NC}"
-        cp "$CLAUDE_DIR/$file" "$CLAUDE_DIR/$backup_name"
+    local file="$1"
+    if [ -f "$file" ]; then
+        local backup_name="${file}.backup.$(date +%Y%m%d_%H%M%S)"
+        log_warn "  Backing up existing $(basename "$file") -> $(basename "$backup_name")"
+        cp "$file" "$backup_name"
     fi
 }
 
-# Restore CLAUDE.md
-if [ -f "CLAUDE.md" ]; then
-    echo -e "${GREEN}✓ Restoring CLAUDE.md${NC}"
-    backup_existing "CLAUDE.md"
-    cp CLAUDE.md "$CLAUDE_DIR/"
-else
-    echo -e "${YELLOW}⚠ CLAUDE.md not found in backup${NC}"
-fi
+prompt_restore() {
+    local category_name="$1"
 
-# Restore settings.json
-if [ -f "settings.json" ]; then
-    echo -e "${GREEN}✓ Restoring settings.json${NC}"
-    backup_existing "settings.json"
-    cp settings.json "$CLAUDE_DIR/"
-else
-    echo -e "${YELLOW}⚠ settings.json not found in backup${NC}"
-fi
-
-# Handle settings.local.json
-echo ""
-echo -e "${BLUE}Settings.local.json Restoration${NC}"
-echo "================================"
-
-if [ -f "settings.local.json" ]; then
-    # Real file exists (with credentials)
-    echo -e "${YELLOW}Found settings.local.json (contains credentials)${NC}"
-    echo ""
-    echo "Options:"
-    echo "  1) Restore it (if you've already added real credentials)"
-    echo "  2) Skip (let Claude Code regenerate as you use it) [RECOMMENDED]"
-    echo ""
-    read -p "Choose option (1 or 2): " choice
-
-    case $choice in
-        1)
-            backup_existing "settings.local.json"
-            cp settings.local.json "$CLAUDE_DIR/"
-            echo -e "${GREEN}✓ Restored settings.local.json${NC}"
-            ;;
-        2)
-            echo -e "${YELLOW}Skipped settings.local.json (will be regenerated)${NC}"
-            ;;
-        *)
-            echo -e "${YELLOW}Invalid choice, skipping${NC}"
-            ;;
-    esac
-elif [ -f "settings.local.json.template" ]; then
-    # Template exists (sanitized)
-    echo -e "${YELLOW}Found settings.local.json.template (sanitized)${NC}"
-    echo ""
-    echo "This template has passwords replaced with placeholders."
-    echo ""
-    echo "Options:"
-    echo "  1) Copy as template (you'll need to edit it manually later)"
-    echo "  2) Skip (let Claude Code regenerate as you use it) [RECOMMENDED]"
-    echo ""
-    read -p "Choose option (1 or 2): " choice
-
-    case $choice in
-        1)
-            cp settings.local.json.template "$CLAUDE_DIR/settings.local.json"
-            echo -e "${YELLOW}✓ Copied template to settings.local.json${NC}"
-            echo -e "${RED}  ⚠ IMPORTANT: Edit $CLAUDE_DIR/settings.local.json${NC}"
-            echo -e "${RED}     and replace placeholders with real credentials!${NC}"
-            ;;
-        2)
-            echo -e "${YELLOW}Skipped settings.local.json (will be regenerated)${NC}"
-            ;;
-        *)
-            echo -e "${YELLOW}Invalid choice, skipping${NC}"
-            ;;
-    esac
-else
-    echo -e "${YELLOW}⚠ No settings.local.json or template found${NC}"
-    echo "  Claude Code will generate this file as you approve commands."
-fi
-
-echo ""
-echo -e "${BLUE}MCP Servers${NC}"
-echo "==========="
-
-if [ -f "mcp-servers.txt" ]; then
-    echo -e "${GREEN}✓ Found MCP server list${NC}"
-    echo ""
-    echo "MCP servers to configure:"
-    cat mcp-servers.txt | grep "ssh-mcp" | head -10 || echo "(List in mcp-servers.txt)"
-    echo ""
-
-    if [ -f "restore-mcp-servers.sh" ]; then
-        echo -e "${YELLOW}Found restore-mcp-servers.sh script${NC}"
-        echo ""
-        echo "To restore MCP servers:"
-        echo "  1. Edit restore-mcp-servers.sh and add your credentials"
-        echo "  2. Run: bash restore-mcp-servers.sh"
-        echo ""
-        echo "Or configure manually using 'claude mcp add' commands"
-    else
-        echo "Configure MCP servers manually:"
-        echo "  claude mcp add -s user --transport stdio SERVER_NAME -- \\"
-        echo "    npx -y ssh-mcp --host=HOST --user=USER --password=PASSWORD"
-        echo ""
-        echo "See mcp-servers.txt for your server list."
+    if [ "$AUTO_YES" = "true" ]; then
+        return 0
     fi
-else
-    echo -e "${YELLOW}⚠ No MCP server list found${NC}"
-fi
 
-echo ""
-echo -e "${GREEN}Restore Summary${NC}"
-echo "==============="
-echo ""
-echo "Restored files:"
-ls -lh "$CLAUDE_DIR"/{CLAUDE.md,settings.json,settings.local.json} 2>/dev/null | awk '{print "  " $9 " (" $5 ")"}'
-echo ""
+    echo -en "Restore ${BLUE}${category_name}${NC}? [Y/n]: "
+    read -r answer
+    case "$answer" in
+        [nN]|[nN][oO])
+            return 1
+            ;;
+        *)
+            return 0
+            ;;
+    esac
+}
 
-echo -e "${BLUE}Next Steps${NC}"
-echo "=========="
-echo ""
-echo "1. Verify settings:"
-echo "   cat $CLAUDE_DIR/CLAUDE.md"
-echo "   cat $CLAUDE_DIR/settings.json"
-echo ""
-echo "2. If you restored settings.local.json:"
-echo "   Review and edit: $CLAUDE_DIR/settings.local.json"
-echo "   Replace placeholders with real credentials"
-echo ""
-echo "3. Configure MCP servers:"
-echo "   See mcp-servers.txt for your server list"
-echo "   Use restore-mcp-servers.sh or configure manually"
-echo ""
-echo "4. Restart Claude Code to apply settings"
-echo ""
-echo "5. Test that everything works:"
-echo "   claude mcp list"
-echo ""
+# Copy a single file from backup to destination, with backup_existing
+restore_file() {
+    local src="$1"
+    local dest="$2"
 
-echo -e "${GREEN}Restore complete!${NC}"
-echo ""
-echo -e "${YELLOW}Note: Some settings (like permissions) will be rebuilt${NC}"
-echo -e "${YELLOW}as you use Claude Code. This is normal and expected.${NC}"
+    if [ ! -f "$src" ]; then
+        return 1
+    fi
+
+    mkdir -p "$(dirname "$dest")"
+    backup_existing "$dest"
+    cp "$src" "$dest"
+    RESTORED_FILES+=("$dest")
+    return 0
+}
+
+# ─── Restore Functions ──────────────────────────────────────────────
+
+restore_global_settings() {
+    log_info "Restoring global settings..."
+    local source_dir="$BACKUP_DIR/global"
+    local count=0
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  No global/ directory found in backup, skipping"
+        return 0
+    fi
+
+    # CLAUDE.md
+    if restore_file "$source_dir/CLAUDE.md" "$CLAUDE_DIR/CLAUDE.md"; then
+        log_detail "  Restored CLAUDE.md"
+        ((count++)) || true
+    fi
+
+    # settings.json
+    if restore_file "$source_dir/settings.json" "$CLAUDE_DIR/settings.json"; then
+        log_detail "  Restored settings.json"
+        ((count++)) || true
+    fi
+
+    # settings.local.json
+    if restore_file "$source_dir/settings.local.json" "$CLAUDE_DIR/settings.local.json"; then
+        log_detail "  Restored settings.local.json"
+        ((count++)) || true
+    fi
+
+    # keybindings.json (optional)
+    if restore_file "$source_dir/keybindings.json" "$CLAUDE_DIR/keybindings.json"; then
+        log_detail "  Restored keybindings.json"
+        ((count++)) || true
+    fi
+
+    # Extra *.md context files (e.g., HOMELAB-CONTEXT.md)
+    if ls "$source_dir"/*.md &>/dev/null; then
+        for md_file in "$source_dir"/*.md; do
+            local basename
+            basename=$(basename "$md_file")
+            # CLAUDE.md already handled above
+            if [ "$basename" = "CLAUDE.md" ]; then
+                continue
+            fi
+            if restore_file "$md_file" "$CLAUDE_DIR/$basename"; then
+                log_detail "  Restored $basename"
+                ((count++)) || true
+            fi
+        done
+    fi
+
+    log_info "  Global settings: $count file(s) restored"
+}
+
+restore_mcp_config() {
+    log_info "Restoring MCP config..."
+    local source_dir="$BACKUP_DIR/global"
+
+    if [ ! -f "$source_dir/claude.json" ]; then
+        log_warn "  No claude.json found in backup, skipping"
+        return 0
+    fi
+
+    # claude.json lives in HOME, not inside .claude/
+    restore_file "$source_dir/claude.json" "$HOME/.claude.json"
+    log_detail "  Restored ~/.claude.json"
+    log_warn "  WARNING: This overwrites OAuth tokens. You may need to re-authenticate."
+
+    log_info "  MCP config: 1 file restored"
+}
+
+restore_skills() {
+    log_info "Restoring skills..."
+    local source_dir="$BACKUP_DIR/skills"
+    local dest_dir="$CLAUDE_DIR/skills"
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  No skills/ directory found in backup, skipping"
+        return 0
+    fi
+
+    local count=0
+    mkdir -p "$dest_dir"
+
+    while IFS= read -r -d '' src_file; do
+        local rel_path="${src_file#$source_dir/}"
+        local dest_file="$dest_dir/$rel_path"
+        mkdir -p "$(dirname "$dest_file")"
+        backup_existing "$dest_file"
+        cp "$src_file" "$dest_file"
+        RESTORED_FILES+=("$dest_file")
+        ((count++)) || true
+    done < <(find "$source_dir" -type f -not -path '*/.git/*' -print0 2>/dev/null)
+
+    RESTORED_DIRS+=("$dest_dir")
+    log_info "  Skills: $count file(s) restored"
+}
+
+restore_plugins() {
+    log_info "Restoring plugins..."
+    local source_dir="$BACKUP_DIR/plugins"
+    local dest_dir="$CLAUDE_DIR/plugins"
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  No plugins/ directory found in backup, skipping"
+        return 0
+    fi
+
+    local count=0
+    mkdir -p "$dest_dir"
+
+    for f in installed_plugins.json blocklist.json known_marketplaces.json; do
+        if restore_file "$source_dir/$f" "$dest_dir/$f"; then
+            log_detail "  Restored $f"
+            ((count++)) || true
+        fi
+    done
+
+    log_info "  Plugins: $count file(s) restored"
+    if [ "$count" -gt 0 ]; then
+        log_detail "  Note: plugins will re-download their cache on next launch"
+    fi
+}
+
+restore_plans() {
+    log_info "Restoring plans..."
+    local source_dir="$BACKUP_DIR/plans"
+    local dest_dir="$CLAUDE_DIR/plans"
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  No plans/ directory found in backup, skipping"
+        return 0
+    fi
+
+    local count=0
+    mkdir -p "$dest_dir"
+
+    for md_file in "$source_dir"/*.md; do
+        [ -f "$md_file" ] || continue
+        local basename
+        basename=$(basename "$md_file")
+        if restore_file "$md_file" "$dest_dir/$basename"; then
+            ((count++)) || true
+        fi
+    done
+
+    log_info "  Plans: $count file(s) restored"
+}
+
+restore_commands() {
+    log_info "Restoring commands..."
+    local source_dir="$BACKUP_DIR/commands"
+    local dest_dir="$CLAUDE_DIR/commands"
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  No commands/ directory found in backup, skipping"
+        return 0
+    fi
+
+    local count=0
+    mkdir -p "$dest_dir"
+
+    for md_file in "$source_dir"/*.md; do
+        [ -f "$md_file" ] || continue
+        local basename
+        basename=$(basename "$md_file")
+        if restore_file "$md_file" "$dest_dir/$basename"; then
+            ((count++)) || true
+        fi
+    done
+
+    log_info "  Commands: $count file(s) restored"
+}
+
+restore_todos() {
+    log_info "Restoring todos..."
+    local source_dir="$BACKUP_DIR/todos"
+    local dest_dir="$CLAUDE_DIR/todos"
+
+    if [ ! -d "$source_dir" ]; then
+        log_warn "  No todos/ directory found in backup, skipping"
+        return 0
+    fi
+
+    local count=0
+    mkdir -p "$dest_dir"
+
+    for json_file in "$source_dir"/*.json; do
+        [ -f "$json_file" ] || continue
+        local basename
+        basename=$(basename "$json_file")
+        if restore_file "$json_file" "$dest_dir/$basename"; then
+            ((count++)) || true
+        fi
+    done
+
+    log_info "  Todos: $count file(s) restored"
+}
+
+restore_projects() {
+    local projects_dir="$BACKUP_DIR/projects"
+
+    if [ ! -d "$projects_dir" ]; then
+        log_warn "No projects/ directory found in backup, skipping"
+        return 0
+    fi
+
+    # Discover project directories in the backup
+    local project_dirs=()
+    for d in "$projects_dir"/*/; do
+        [ -d "$d" ] || continue
+        project_dirs+=("$(basename "$d")")
+    done
+
+    if [ ${#project_dirs[@]} -eq 0 ]; then
+        log_warn "  No project data found in backup, skipping"
+        return 0
+    fi
+
+    log_info "Restoring ${#project_dirs[@]} project(s)..."
+    local total_count=0
+
+    for project in "${project_dirs[@]}"; do
+        local src_base="$projects_dir/$project"
+        local dest_base="$CLAUDE_DIR/projects/$project"
+        local proj_count=0
+
+        log_detail "  Project: $project"
+        mkdir -p "$dest_base"
+
+        # Restore memory files
+        if [ -d "$src_base/memory" ]; then
+            while IFS= read -r -d '' src_file; do
+                local rel_path="${src_file#$src_base/memory/}"
+                local dest_file="$dest_base/memory/$rel_path"
+                mkdir -p "$(dirname "$dest_file")"
+                backup_existing "$dest_file"
+                cp "$src_file" "$dest_file"
+                RESTORED_FILES+=("$dest_file")
+                ((proj_count++)) || true
+            done < <(find "$src_base/memory" -type f -print0 2>/dev/null)
+            log_detail "    Memory: $proj_count file(s)"
+        fi
+
+        # Restore session files
+        # Sessions in backup are stored under sessions/ subdir,
+        # but Claude Code reads them from the project root dir.
+        if [ -d "$src_base/sessions" ]; then
+            local session_count=0
+            while IFS= read -r -d '' src_file; do
+                local basename
+                basename=$(basename "$src_file")
+                local dest_file="$dest_base/$basename"
+                backup_existing "$dest_file"
+                cp "$src_file" "$dest_file"
+                RESTORED_FILES+=("$dest_file")
+                ((session_count++)) || true
+            done < <(find "$src_base/sessions" -type f \( -name "*.jsonl" -o -name "*.meta.json" \) -print0 2>/dev/null)
+            ((proj_count += session_count)) || true
+            log_detail "    Sessions: $session_count file(s) -> project root"
+        fi
+
+        ((total_count += proj_count)) || true
+    done
+
+    log_info "  Projects total: $total_count file(s) restored"
+}
+
+# ─── Main Flow ──────────────────────────────────────────────────────
+
+main() {
+    # Parse arguments
+    local positional_args=()
+    for arg in "$@"; do
+        case "$arg" in
+            --yes|-y)
+                AUTO_YES=true
+                ;;
+            *)
+                positional_args+=("$arg")
+                ;;
+        esac
+    done
+
+    # Determine BACKUP_DIR: first positional arg or parent of script directory
+    if [ ${#positional_args[@]} -gt 0 ]; then
+        BACKUP_DIR="${positional_args[0]}"
+    else
+        SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        BACKUP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    fi
+
+    echo -e "${GREEN}Claude Code Restore Script v2${NC}"
+    echo "==============================="
+    echo ""
+
+    if [ "$AUTO_YES" = "true" ]; then
+        log_info "Non-interactive mode (--yes): all categories will be restored"
+        echo ""
+    fi
+
+    # Parse config
+    parse_config
+
+    # Create claude dir if missing
+    if [ ! -d "$CLAUDE_DIR" ]; then
+        log_info "Creating Claude Code directory: $CLAUDE_DIR"
+        mkdir -p "$CLAUDE_DIR"
+    fi
+
+    echo ""
+
+    # Restore each category with interactive prompts
+    if prompt_restore "Global settings (CLAUDE.md, settings.json, etc.)"; then
+        restore_global_settings
+    else
+        log_info "Skipped global settings"
+    fi
+    echo ""
+
+    if prompt_restore "MCP config (~/.claude.json)"; then
+        restore_mcp_config
+    else
+        log_info "Skipped MCP config"
+    fi
+    echo ""
+
+    if prompt_restore "Skills"; then
+        restore_skills
+    else
+        log_info "Skipped skills"
+    fi
+    echo ""
+
+    if prompt_restore "Plugins"; then
+        restore_plugins
+    else
+        log_info "Skipped plugins"
+    fi
+    echo ""
+
+    if prompt_restore "Plans"; then
+        restore_plans
+    else
+        log_info "Skipped plans"
+    fi
+    echo ""
+
+    if prompt_restore "Commands"; then
+        restore_commands
+    else
+        log_info "Skipped commands"
+    fi
+    echo ""
+
+    if [ "$INCLUDE_TODOS" = "true" ]; then
+        if prompt_restore "Todos"; then
+            restore_todos
+        else
+            log_info "Skipped todos"
+        fi
+    else
+        log_info "Todos disabled in config, skipping"
+    fi
+    echo ""
+
+    if prompt_restore "Projects (${#PROJECTS[@]} configured)"; then
+        restore_projects
+    else
+        log_info "Skipped projects"
+    fi
+    echo ""
+
+    # ─── Verification Summary ───────────────────────────────────────
+    echo ""
+    echo -e "${GREEN}Restore Verification Summary${NC}"
+    echo "=============================="
+
+    if [ ${#RESTORED_FILES[@]} -gt 0 ]; then
+        echo ""
+        echo "Restored files (${#RESTORED_FILES[@]} total):"
+        # Show key directories with sizes
+        local shown_dirs=()
+
+        # Show individual files in CLAUDE_DIR root
+        for f in "$CLAUDE_DIR"/*.md "$CLAUDE_DIR"/*.json; do
+            [ -f "$f" ] || continue
+            local size
+            size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
+            echo "  $f ($size bytes)"
+        done
+
+        # Show restored subdirectories with file counts
+        for subdir in skills plugins plans commands todos projects; do
+            local full_dir="$CLAUDE_DIR/$subdir"
+            if [ -d "$full_dir" ]; then
+                local file_count
+                file_count=$(find "$full_dir" -type f 2>/dev/null | wc -l | tr -d ' ')
+                local dir_size
+                dir_size=$(du -sh "$full_dir" 2>/dev/null | cut -f1 || echo "unknown")
+                echo "  $full_dir/ ($file_count files, $dir_size)"
+            fi
+        done
+
+        # Show ~/.claude.json if it was restored
+        if [ -f "$HOME/.claude.json" ]; then
+            local size
+            size=$(wc -c < "$HOME/.claude.json" 2>/dev/null | tr -d ' ')
+            echo "  $HOME/.claude.json ($size bytes)"
+        fi
+    else
+        echo ""
+        echo "  No files were restored."
+    fi
+
+    # ─── Next Steps ─────────────────────────────────────────────────
+    echo ""
+    echo -e "${BLUE}Next Steps${NC}"
+    echo "=========="
+    echo ""
+    echo "1. Restart Claude Code to apply restored settings"
+    echo ""
+
+    # Check if claude.json was restored
+    local claude_json_restored=false
+    for f in "${RESTORED_FILES[@]}"; do
+        if [[ "$f" == *".claude.json" ]]; then
+            claude_json_restored=true
+            break
+        fi
+    done
+    if [ "$claude_json_restored" = "true" ]; then
+        echo -e "2. ${YELLOW}MCP config was restored -- you may need to re-authenticate${NC}"
+        echo "   (OAuth tokens in ~/.claude.json may be stale)"
+        echo ""
+    fi
+
+    echo "3. Verify MCP servers are working:"
+    echo "   claude mcp list"
+    echo ""
+
+    log_info "Restore complete!"
+}
+
+main "$@"
