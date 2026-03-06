@@ -1,127 +1,98 @@
-# Quick Start Guide
+# Quick Start Guide (v2)
 
-Get your Claude Code settings backed up in 5 minutes!
+Back up your Claude Code settings in 5 minutes.
 
 ## Prerequisites
 
-- Claude Code installed
-- Git installed
-- GitHub account (or other Git hosting)
+- Claude Code installed (run it at least once so `~/.claude/` exists)
+- Git, bash, and **jq** installed
+- A GitHub account (or other Git hosting)
 
-## For the Impatient
+## Backup Setup
 
 ```bash
-# 1. Create backup directory
-mkdir ~/claude-code-settings-backup
-cd ~/claude-code-settings-backup
+# 1. Create a private GitHub repo for your backup
+gh repo create claude-code-backup --private --clone
+cd claude-code-backup
 
-# 2. Download and run backup script
-curl -O https://raw.githubusercontent.com/jtklinger/claude-code-backup-guide/main/scripts/backup.sh
-bash backup.sh
+# 2. Get the scripts (clone guide repo or copy scripts/ directory)
+git clone https://github.com/jtklinger/claude-code-backup-guide.git /tmp/cbg
+cp /tmp/cbg/scripts/*.sh ./scripts/
+cp /tmp/cbg/templates/.gitignore .
 
-# 3. Create GitHub repo (or use gh CLI)
-gh repo create claude-code-settings-backup --private
+# 3. Run init — scans projects, generates backup-config.json
+bash scripts/init.sh .
 
-# 4. Push to GitHub
-git remote add origin https://github.com/YOUR_USERNAME/claude-code-settings-backup.git
-git add .
-git commit -m "Initial Claude Code backup"
+# 4. Run first backup
+bash scripts/backup.sh .
+
+# 5. Push to GitHub
 git push -u origin main
 ```
 
-Done! Your settings are backed up.
+Done. Your settings, MCP config, skills, plans, commands, session transcripts, todos, and per-project memory are all backed up.
+
+## What Gets Backed Up
+
+| Category | Source | Details |
+|---|---|---|
+| Global settings | `~/.claude/` | CLAUDE.md, settings.json, keybindings.json, extra *.md files |
+| MCP config | `~/.claude.json` | Full file (server definitions, OAuth tokens) |
+| Skills | `~/.claude/skills/` | All skill files |
+| Plugins | `~/.claude/plugins/` | Registry files (not cache) |
+| Plans | `~/.claude/plans/` | Saved plan documents |
+| Commands | `~/.claude/commands/` | Custom slash commands |
+| Todos | `~/.claude/todos/` | Per-session task state |
+| Projects | `~/.claude/projects/` | MEMORY.md, topic files, session transcripts |
 
 ## Restore on New Machine
 
 ```bash
-# 1. Clone your backup
-git clone https://github.com/YOUR_USERNAME/claude-code-settings-backup.git
-cd claude-code-settings-backup
+# 1. Clone your backup repo
+git clone https://github.com/YOUR_USERNAME/claude-code-backup.git
+cd claude-code-backup
 
-# 2. Run restore script
-curl -O https://raw.githubusercontent.com/jtklinger/claude-code-backup-guide/main/scripts/restore.sh
-bash restore.sh
+# 2. Install jq if not already present
+#    macOS: brew install jq
+#    Linux: sudo apt install jq
+#    Windows: winget install jqlang.jq
 
-# 3. Restart Claude Code
+# 3. Run restore (interactive — prompts per category)
+bash scripts/restore.sh .
+
+# 4. Restart Claude Code
 ```
 
-## What Gets Backed Up?
+Use `--yes` to skip prompts and restore everything: `bash scripts/restore.sh . --yes`
 
-- ✅ Global instructions (CLAUDE.md)
-- ✅ Basic settings (settings.json)
-- ✅ Permissions (sanitized, no passwords)
-- ✅ MCP server list (for reference)
+## Automate Backups
 
-## What Doesn't Get Backed Up?
+**Linux/macOS (cron):**
 
-- ❌ Credentials (.credentials.json)
-- ❌ Chat history
-- ❌ Debug logs
-- ❌ Temporary files
+```
+0 2 * * * /path/to/scripts/backup.sh /path/to/claude-code-backup
+```
 
-## Next Steps
+**Windows (Task Scheduler):**
 
-- [Read the full guide](README.md) for detailed instructions
-- [Set up automatic backups](README.md#faq) with cron
-- [Configure MCP servers](README.md#restoring-on-a-new-machine)
+- Program: `C:\Program Files\Git\bin\bash.exe`
+- Arguments: `/path/to/scripts/backup.sh /path/to/claude-code-backup`
+
+To auto-push after each backup, set `"git_auto_push": true` in `backup-config.json`.
 
 ## Troubleshooting
 
-### Script won't run
+**"jq not found"** — Install jq before running backup or restore.
 
-```bash
-# Make it executable
-chmod +x backup.sh
-./backup.sh
-```
+**"Config file not found"** — Run `init.sh` first to generate `backup-config.json`.
 
-### Can't find settings
+**Script won't run** — `chmod +x scripts/*.sh` then retry.
 
-```bash
-# Check if Claude Code is installed
-ls ~/.claude/
+## Next Steps
 
-# If empty, install Claude Code first
-```
-
-### Found real passwords in backup
-
-```bash
-# The backup script should catch this
-# If you see this error, review files before committing:
-grep -i "password" ./*
-
-# Never commit real passwords!
-```
-
-## Platform-Specific Notes
-
-### Windows (Git Bash)
-
-```bash
-# Use Git Bash or WSL
-# Paths like ~/.claude work in Git Bash
-# Full path: C:\Users\<username>\.claude
-```
-
-### macOS
-
-```bash
-# Everything should work as shown
-```
-
-### Linux
-
-```bash
-# Everything should work as shown
-```
-
-## Need Help?
-
-- [Full documentation](README.md)
+- [Full documentation](README.md) for detailed explanations
 - [Report an issue](https://github.com/jtklinger/claude-code-backup-guide/issues)
-- [Contributing guide](CONTRIBUTING.md)
 
 ---
 
-**Remember**: Always keep your backup repository **private** to protect your infrastructure details!
+**Keep your backup repository private** — it contains infrastructure details and MCP server configurations.
