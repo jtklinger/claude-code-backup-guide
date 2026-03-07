@@ -7,7 +7,7 @@
 # settings, MCP config, skills, plugins, plans, commands,
 # todos, and per-project data.
 #
-# Usage: bash backup.sh [backup-directory]
+# Usage: bash backup.sh [backup-directory] [--sanitize <output-directory>]
 #
 # Fully non-interactive — safe for cron.
 
@@ -423,9 +423,33 @@ backup_projects() {
 # ─── Main Flow ──────────────────────────────────────────────────────
 
 main() {
-    # Determine BACKUP_DIR: $1 or parent of script directory (repo root)
-    if [ -n "$1" ]; then
-        BACKUP_DIR="$1"
+    # Parse arguments
+    SANITIZE_MODE=false
+    SANITIZE_DIR=""
+    local positional_args=()
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --sanitize)
+                SANITIZE_MODE=true
+                if [ -z "$2" ] || [[ "$2" == --* ]]; then
+                    log_error "--sanitize requires an output directory argument"
+                    echo "Usage: bash backup.sh [backup-directory] --sanitize <output-directory>"
+                    exit 1
+                fi
+                SANITIZE_DIR="$2"
+                shift 2
+                ;;
+            *)
+                positional_args+=("$1")
+                shift
+                ;;
+        esac
+    done
+
+    # Determine BACKUP_DIR: first positional arg or parent of script directory
+    if [ ${#positional_args[@]} -gt 0 ]; then
+        BACKUP_DIR="${positional_args[0]}"
     else
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
         BACKUP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
@@ -494,6 +518,12 @@ main() {
                 log_error "Push failed -- please push manually"
             fi
         fi
+    fi
+
+    # Sanitized export if requested
+    if [ "$SANITIZE_MODE" = "true" ]; then
+        echo ""
+        sanitize_and_export
     fi
 
     # Final summary
