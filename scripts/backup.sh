@@ -17,6 +17,7 @@ set -e
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 RED='\033[0;31m'
+BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Global state
@@ -418,6 +419,173 @@ backup_projects() {
 
     COUNTS_PROJECTS=$total_count
     log_info "  Projects total: $total_count file(s)"
+}
+
+# ─── Sanitize/Export Functions ─────────────────────────────────────
+
+sanitize_claude_json() {
+    local src="$BACKUP_DIR/global/claude.json"
+    local dest="$SANITIZE_DIR/global/claude.json"
+
+    if [ ! -f "$src" ]; then
+        log_warn "  No claude.json in backup, skipping MCP sanitization"
+        return 0
+    fi
+
+    mkdir -p "$SANITIZE_DIR/global"
+
+    # jq filter that:
+    # 1. Keeps only mcpServers
+    # 2. For each server: keeps type and command, redacts args and env
+    local jq_filter='
+    {
+        mcpServers: (
+            .mcpServers // {} | to_entries | map({
+                key: .key,
+                value: {
+                    type: .value.type,
+                    command: .value.command,
+                    args: (
+                        .value.args // [] | map(
+                            if startswith("--host=") then "--host=<HOSTNAME>"
+                            elif startswith("--user=") then "--user=<USERNAME>"
+                            elif startswith("--key=") then "--key=<SSH_KEY_PATH>"
+                            elif startswith("--header") then .
+                            elif test("^(authorization:|Bearer )") then "<AUTH_TOKEN>"
+                            elif test("^https?://") then "<URL>"
+                            elif test("\\.(com|local|net|org|io)([:/]|$)") then "<HOSTNAME>"
+                            elif test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+") then "<HOSTNAME>"
+                            elif test("^(/|[A-Z]:[/\\\\]|~/)") then "<PATH>"
+                            else .
+                            end
+                        )
+                    ),
+                    env: (
+                        .value.env // {} | to_entries | map({
+                            key: .key,
+                            value: "<REDACTED>"
+                        }) | from_entries
+                    )
+                } | if .args == [] then del(.args) else . end
+                  | if .env == {} then del(.env) else . end
+            }) | from_entries
+        )
+    }'
+
+    jq "$jq_filter" "$src" > "$dest"
+    log_info "  Sanitized claude.json (MCP servers with redacted credentials)"
+}
+
+sanitize_settings() {
+    local src_dir="$BACKUP_DIR/global"
+    local dest_dir="$SANITIZE_DIR/global"
+    mkdir -p "$dest_dir"
+
+    # jq filter: redact mcp__*__* permission entries, deduplicate
+    local jq_filter='
+    if .permissions.allow then
+        .permissions.allow = (
+            [.permissions.allow[] |
+                if startswith("mcp__") then
+                    split("__") |
+                    if length >= 3 then
+                        .[0] + "__<server>__" + .[-1]
+                    else
+                        "mcp__<server>"
+                    end
+                else .
+                end
+            ] | unique
+        )
+    else .
+    end'
+
+    for f in settings.json settings.local.json; do
+        if [ -f "$src_dir/$f" ]; then
+            jq "$jq_filter" "$src_dir/$f" > "$dest_dir/$f"
+            log_info "  Sanitized $f (redacted MCP permission names)"
+        fi
+    done
+}
+
+copy_safe_files() {
+    local src_dir="$BACKUP_DIR"
+    local dest_dir="$SANITIZE_DIR"
+
+    # Copy *.md files from global/ (CLAUDE.md, extra context files)
+    if ls "$src_dir/global/"*.md &>/dev/null; then
+        mkdir -p "$dest_dir/global"
+        for f in "$src_dir/global/"*.md; do
+            cp "$f" "$dest_dir/global/"
+        done
+        log_info "  Copied global markdown files"
+    fi
+
+    # Copy keybindings.json if present
+    if [ -f "$src_dir/global/keybindings.json" ]; then
+        mkdir -p "$dest_dir/global"
+        cp "$src_dir/global/keybindings.json" "$dest_dir/global/"
+        log_info "  Copied keybindings.json"
+    fi
+
+    # Copy entire directories that are safe as-is
+    for category in skills plugins plans commands; do
+        if [ -d "$src_dir/$category" ]; then
+            mkdir -p "$dest_dir/$category"
+            cp -r "$src_dir/$category/." "$dest_dir/$category/"
+            local count
+            count=$(find "$dest_dir/$category" -type f 2>/dev/null | wc -l)
+            log_info "  Copied $category/ ($count files)"
+        fi
+    done
+}
+
+prompt_project_memory() {
+    local src_projects="$BACKUP_DIR/projects"
+
+    if [ ! -d "$src_projects" ]; then
+        log_info "  No project data in backup, skipping"
+        return 0
+    fi
+
+    local project_dirs=()
+    for d in "$src_projects"/*/; do
+        [ -d "$d/memory" ] || continue
+        project_dirs+=("$(basename "$d")")
+    done
+
+    if [ ${#project_dirs[@]} -eq 0 ]; then
+        log_info "  No project memory data found"
+        return 0
+    fi
+
+    echo ""
+    log_info "Project memory export (sessions/todos are always excluded):"
+    echo ""
+
+    local exported=0
+    for project in "${project_dirs[@]}"; do
+        local mem_dir="$src_projects/$project/memory"
+        local file_count
+        file_count=$(find "$mem_dir" -type f 2>/dev/null | wc -l)
+
+        echo -en "  Include memory for ${BLUE}${project}${NC} ($file_count files)? [Y/n]: "
+        read -r answer
+        case "$answer" in
+            [nN]|[nN][oO])
+                log_info "    Skipped $project"
+                ;;
+            *)
+                local dest="$SANITIZE_DIR/projects/$project/memory"
+                mkdir -p "$dest"
+                cp -r "$mem_dir/." "$dest/"
+                log_info "    Exported $project memory ($file_count files)"
+                ((exported++)) || true
+                ;;
+        esac
+    done
+
+    log_info "  Exported memory for $exported project(s)"
 }
 
 # ─── Main Flow ──────────────────────────────────────────────────────
