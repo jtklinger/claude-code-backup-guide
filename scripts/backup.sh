@@ -434,45 +434,48 @@ sanitize_claude_json() {
 
     mkdir -p "$SANITIZE_DIR/global"
 
-    # jq filter that:
-    # 1. Keeps only mcpServers
-    # 2. For each server: keeps type and command, redacts args and env
-    local jq_filter='
-    {
-        mcpServers: (
-            .mcpServers // {} | to_entries | map({
-                key: .key,
-                value: {
-                    type: .value.type,
-                    command: .value.command,
-                    args: (
-                        .value.args // [] | map(
-                            if startswith("--host=") then "--host=<HOSTNAME>"
-                            elif startswith("--user=") then "--user=<USERNAME>"
-                            elif startswith("--key=") then "--key=<SSH_KEY_PATH>"
-                            elif startswith("--header") then .
-                            elif test("^(authorization:|Bearer )") then "<AUTH_TOKEN>"
-                            elif test("^https?://") then "<URL>"
-                            elif test("\\.(com|local|net|org|io)([:/]|$)") then "<HOSTNAME>"
-                            elif test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+") then "<HOSTNAME>"
-                            elif test("^(/|[A-Z]:[/\\\\]|~/)") then "<PATH>"
-                            else .
-                            end
-                        )
-                    ),
-                    env: (
-                        .value.env // {} | to_entries | map({
-                            key: .key,
-                            value: "<REDACTED>"
-                        }) | from_entries
+    # Write jq filter to temp file (avoids Windows shell quoting issues)
+    local jq_tmp
+    jq_tmp=$(mktemp)
+    cat > "$jq_tmp" << 'JQFILTER'
+{
+    mcpServers: (
+        .mcpServers // {} | to_entries | map({
+            key: .key,
+            value: ({
+                type: .value.type,
+                command: (if (.value.command | test("^(/|[A-Z]:[/\\\\\\\\]|~/)")) then "<PATH>" else .value.command end),
+                args: (
+                    .value.args // [] | map(
+                        if (. == "/c" or . == "/C") then .
+                        elif startswith("--host=") then "--host=<HOSTNAME>"
+                        elif startswith("--user=") then "--user=<USERNAME>"
+                        elif startswith("--key=") then "--key=<SSH_KEY_PATH>"
+                        elif startswith("--header") then .
+                        elif test("^(authorization:|Bearer )") then "<AUTH_TOKEN>"
+                        elif test("^https?://") then "<URL>"
+                        elif test("\\\\.(com|local|net|org|io)([:/]|$)") then "<HOSTNAME>"
+                        elif test("^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+") then "<HOSTNAME>"
+                        elif test("^(/.{2,}|[A-Z]:[/\\\\\\\\]|~/)") then "<PATH>"
+                        else .
+                        end
                     )
-                } | if .args == [] then del(.args) else . end
-                  | if .env == {} then del(.env) else . end
-            }) | from_entries
-        )
-    }'
+                ),
+                env: (
+                    .value.env // {} | to_entries | map({
+                        key: .key,
+                        value: "<REDACTED>"
+                    }) | from_entries
+                )
+            } | if .args == [] then del(.args) else . end
+              | if .env == {} then del(.env) else . end)
+        }) | from_entries
+    )
+}
+JQFILTER
 
-    jq "$jq_filter" "$src" > "$dest"
+    jq -f "$jq_tmp" "$src" > "$dest"
+    rm -f "$jq_tmp"
     log_info "  Sanitized claude.json (MCP servers with redacted credentials)"
 }
 
@@ -481,31 +484,35 @@ sanitize_settings() {
     local dest_dir="$SANITIZE_DIR/global"
     mkdir -p "$dest_dir"
 
-    # jq filter: redact mcp__*__* permission entries, deduplicate
-    local jq_filter='
-    if .permissions.allow then
-        .permissions.allow = (
-            [.permissions.allow[] |
-                if startswith("mcp__") then
-                    split("__") |
-                    if length >= 3 then
-                        .[0] + "__<server>__" + .[-1]
-                    else
-                        "mcp__<server>"
-                    end
-                else .
+    # Write jq filter to temp file (avoids Windows shell quoting issues)
+    local jq_tmp
+    jq_tmp=$(mktemp)
+    cat > "$jq_tmp" << 'JQFILTER'
+if .permissions.allow then
+    .permissions.allow = (
+        [.permissions.allow[] |
+            if startswith("mcp__") then
+                split("__") |
+                if length >= 3 then
+                    .[0] + "__<server>__" + .[-1]
+                else
+                    "mcp__<server>"
                 end
-            ] | unique
-        )
-    else .
-    end'
+            else .
+            end
+        ] | unique
+    )
+else .
+end
+JQFILTER
 
     for f in settings.json settings.local.json; do
         if [ -f "$src_dir/$f" ]; then
-            jq "$jq_filter" "$src_dir/$f" > "$dest_dir/$f"
+            jq -f "$jq_tmp" "$src_dir/$f" > "$dest_dir/$f"
             log_info "  Sanitized $f (redacted MCP permission names)"
         fi
     done
+    rm -f "$jq_tmp"
 }
 
 copy_safe_files() {
