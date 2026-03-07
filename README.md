@@ -10,6 +10,7 @@ A config-driven system for backing up and restoring your complete Claude Code en
 - [Quick Start](#quick-start)
 - [Detailed Instructions](#detailed-instructions)
 - [Scheduling Automatic Backups](#scheduling-automatic-backups)
+- [Sanitized Export for Sharing](#sanitized-export-for-sharing)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
 - [FAQ](#faq)
@@ -206,7 +207,7 @@ Usage: bash init.sh [backup-directory]
 #### backup.sh
 
 ```
-Usage: bash backup.sh [backup-directory]
+Usage: bash backup.sh [backup-directory] [--sanitize <output-directory>]
 ```
 
 - Reads `backup-config.json` from the backup directory
@@ -216,6 +217,7 @@ Usage: bash backup.sh [backup-directory]
 - Stages, commits, and optionally pushes
 - Fully non-interactive -- safe for cron or Task Scheduler
 - If no backup-directory argument is provided, assumes the script's parent directory is the backup repo
+- `--sanitize <output-directory>` produces a credential-free export in the given directory (see [Sanitized Export](#sanitized-export-for-sharing))
 
 #### restore.sh
 
@@ -265,6 +267,54 @@ To push to your remote after every backup, edit `backup-config.json`:
 ```
 
 The backup script will attempt to push after committing. If the push fails, it logs a warning but does not exit with an error.
+
+## Sanitized Export for Sharing
+
+The `--sanitize` flag produces a credential-free copy of your settings, safe for sharing publicly or with teammates.
+
+### Usage
+
+```bash
+# Run backup and export sanitized copy
+bash scripts/backup.sh ~/claude-code-backup --sanitize ~/claude-export
+
+# Share the export directory
+cd ~/claude-export
+git init && git add -A && git commit -m "Claude Code settings template"
+git remote add origin git@github.com:YOUR_USER/claude-code-template.git
+git push -u origin main
+```
+
+### What gets redacted
+
+| Data | Action |
+|------|--------|
+| MCP server hostnames | Replaced with `<HOSTNAME>` |
+| MCP usernames | Replaced with `<USERNAME>` |
+| SSH key paths | Replaced with `<SSH_KEY_PATH>` |
+| Auth tokens / Bearer tokens | Replaced with `<AUTH_TOKEN>` |
+| URLs in MCP args | Replaced with `<URL>` |
+| Environment variable values | Replaced with `<REDACTED>` |
+| File paths in MCP args | Replaced with `<PATH>` |
+| MCP permission names | Server names replaced with `<server>` |
+| OAuth account data | Removed entirely |
+| App state (counters, caches) | Removed entirely |
+| Sessions and todos | Excluded from export |
+
+### What's preserved
+
+- CLAUDE.md and extra context files (as-is)
+- Settings structure (plugins, keybindings, preferences)
+- MCP server names and types (structure without credentials)
+- Skills, plans, commands, plugin registry (as-is)
+- Per-project memory (interactive selection)
+
+### Using an export on a new machine
+
+1. Copy the export files into `~/.claude/`
+2. Edit `global/claude.json` — replace `<PLACEHOLDER>` values with your server details
+3. Edit `global/settings.json` — update `mcp__<server>__*` permission entries
+4. Restart Claude Code
 
 ## Security
 
