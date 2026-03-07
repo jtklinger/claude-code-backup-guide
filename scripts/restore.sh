@@ -70,14 +70,15 @@ parse_config() {
         exit 1
     fi
 
-    # Read config values
-    CLAUDE_DIR=$(jq -r '.claude_dir // "~/.claude"' "$config_file")
-    INCLUDE_SESSIONS=$(jq -r '.include_sessions // true' "$config_file")
-    INCLUDE_TODOS=$(jq -r '.include_todos // true' "$config_file")
+    # Read config values (strip \r for Windows compatibility)
+    CLAUDE_DIR=$(jq -r '.claude_dir // "~/.claude"' "$config_file" | tr -d '\r')
+    INCLUDE_SESSIONS=$(jq -r '.include_sessions // true' "$config_file" | tr -d '\r')
+    INCLUDE_TODOS=$(jq -r '.include_todos // true' "$config_file" | tr -d '\r')
 
     # Read projects array
     PROJECTS=()
     while IFS= read -r proj; do
+        proj="${proj%$'\r'}"  # Strip Windows carriage return
         [ -n "$proj" ] && PROJECTS+=("$proj")
     done < <(jq -r '.projects[]? // empty' "$config_file")
 
