@@ -24,6 +24,7 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 - Session .jsonl files are stored in `projects/<name>/sessions/` in the backup but restored to `projects/<name>/` (the project root) where Claude Code reads them
 - Cross-platform: Windows Git Bash, macOS, Linux — paths use `$HOME/.claude`
 - `~/.claude.json` (in HOME, outside `.claude/`) holds MCP server configs and is backed up as `global/claude.json`
+- `--sanitize <output-dir>` flag on backup.sh produces a credential-free export for sharing (strips OAuth, MCP credentials, app state; redacts hostnames/paths in server configs)
 
 ## Data Categories
 
