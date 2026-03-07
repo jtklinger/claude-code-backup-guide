@@ -588,6 +588,78 @@ prompt_project_memory() {
     log_info "  Exported memory for $exported project(s)"
 }
 
+generate_export_readme() {
+    cat > "$SANITIZE_DIR/README.md" << 'EXPORT_README'
+# Claude Code Settings Export
+
+This is a sanitized export of Claude Code settings, safe for sharing.
+
+## What's included
+
+| Category | Directory | Description |
+|----------|-----------|-------------|
+| Global instructions | `global/CLAUDE.md` | Custom instructions for all sessions |
+| Extra context | `global/*.md` | Additional markdown context files |
+| Settings | `global/settings.json` | Permissions, plugins, preferences |
+| Keybindings | `global/keybindings.json` | Custom key bindings |
+| MCP config | `global/claude.json` | Server definitions (credentials redacted) |
+| Skills | `skills/` | Installed skill packages |
+| Plugins | `plugins/` | Plugin registry |
+| Plans | `plans/` | Saved implementation plans |
+| Commands | `commands/` | Custom slash commands |
+| Project memory | `projects/` | Per-project context (if selected) |
+
+## What was redacted
+
+- **MCP server credentials:** Hostnames, usernames, SSH key paths, auth tokens, and URLs replaced with placeholders (`<HOSTNAME>`, `<USERNAME>`, `<SSH_KEY_PATH>`, `<AUTH_TOKEN>`, `<URL>`, `<PATH>`)
+- **MCP environment variables:** All values replaced with `<REDACTED>`
+- **MCP permission names:** Server-specific names replaced with `<server>` pattern
+- **Account data:** OAuth tokens, user IDs, email addresses removed entirely
+- **App state:** Runtime counters, caches, and analytics data removed
+
+## Setup instructions
+
+1. Copy files to your `~/.claude/` directory (or use `restore.sh` from the backup guide)
+2. Edit `global/claude.json` and replace all `<PLACEHOLDER>` values with your own server details
+3. Edit `global/settings.json` and update MCP permission entries to match your server names
+4. Restart Claude Code
+EXPORT_README
+
+    log_info "  Generated README.md for export"
+}
+
+sanitize_and_export() {
+    echo -e "${GREEN}Sanitized Export${NC}"
+    echo "================"
+    echo ""
+
+    # Create/clean output directory
+    mkdir -p "$SANITIZE_DIR"
+
+    log_info "Exporting sanitized settings to: $SANITIZE_DIR"
+    echo ""
+
+    # Sanitize sensitive files
+    sanitize_claude_json
+    sanitize_settings
+
+    # Copy non-sensitive files
+    copy_safe_files
+
+    # Interactive project memory selection
+    prompt_project_memory
+
+    # Generate README
+    echo ""
+    generate_export_readme
+
+    # Summary
+    echo ""
+    local total_files
+    total_files=$(find "$SANITIZE_DIR" -type f 2>/dev/null | wc -l)
+    log_info "Export complete: $total_files files in $SANITIZE_DIR"
+}
+
 # ─── Main Flow ──────────────────────────────────────────────────────
 
 main() {
