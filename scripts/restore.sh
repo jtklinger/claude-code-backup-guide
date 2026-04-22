@@ -26,6 +26,18 @@ AUTO_YES=false
 RESTORED_FILES=()
 RESTORED_DIRS=()
 
+# User-content directories restored via a generic loop.
+# Must match the list in backup.sh.
+USER_CONTENT_DIRS=(
+    "plans:*.md"
+    "commands:*.md"
+    "agents:*"
+    "output-styles:*"
+    "rules:*"
+    "hooks:*"
+    "scheduled-tasks:*"
+)
+
 # Timestamp for log lines
 log_ts() {
     date '+%Y-%m-%d %H:%M:%S'
@@ -257,54 +269,34 @@ restore_plugins() {
     fi
 }
 
-restore_plans() {
-    log_info "Restoring plans..."
-    local source_dir="$BACKUP_DIR/plans"
-    local dest_dir="$CLAUDE_DIR/plans"
+restore_user_content() {
+    local name="$1"
+    local glob="${2:-*}"
+    local source_dir="$BACKUP_DIR/$name"
+    local dest_dir="$CLAUDE_DIR/$name"
+
+    log_info "Restoring $name..."
 
     if [ ! -d "$source_dir" ]; then
-        log_warn "  No plans/ directory found in backup, skipping"
+        log_warn "  No $name/ directory found in backup, skipping"
         return 0
     fi
 
     local count=0
     mkdir -p "$dest_dir"
 
-    for md_file in "$source_dir"/*.md; do
-        [ -f "$md_file" ] || continue
-        local basename
-        basename=$(basename "$md_file")
-        if restore_file "$md_file" "$dest_dir/$basename"; then
+    # Walk the backup dir recursively so nested structure (e.g. scheduled-tasks/<task>/SKILL.md)
+    # is preserved on restore.
+    while IFS= read -r -d '' src_file; do
+        local rel_path="${src_file#$source_dir/}"
+        local dest_file="$dest_dir/$rel_path"
+        mkdir -p "$(dirname "$dest_file")"
+        if restore_file "$src_file" "$dest_file"; then
             ((count++)) || true
         fi
-    done
+    done < <(find "$source_dir" -type f -name "$glob" -print0 2>/dev/null)
 
-    log_info "  Plans: $count file(s) restored"
-}
-
-restore_commands() {
-    log_info "Restoring commands..."
-    local source_dir="$BACKUP_DIR/commands"
-    local dest_dir="$CLAUDE_DIR/commands"
-
-    if [ ! -d "$source_dir" ]; then
-        log_warn "  No commands/ directory found in backup, skipping"
-        return 0
-    fi
-
-    local count=0
-    mkdir -p "$dest_dir"
-
-    for md_file in "$source_dir"/*.md; do
-        [ -f "$md_file" ] || continue
-        local basename
-        basename=$(basename "$md_file")
-        if restore_file "$md_file" "$dest_dir/$basename"; then
-            ((count++)) || true
-        fi
-    done
-
-    log_info "  Commands: $count file(s) restored"
+    log_info "  $name: $count file(s) restored"
 }
 
 restore_todos() {
@@ -395,6 +387,38 @@ restore_projects() {
             log_detail "    Sessions: $session_count file(s) -> project root"
         fi
 
+        # Restore per-session nested data: backup layout is
+        # projects/<hash>/<category>/<session-uuid>/<file>, restored to
+        # projects/<hash>/<session-uuid>/<category>/<file>.
+        for category in subagents tool-results; do
+            local src_category="$src_base/$category"
+            [ -d "$src_category" ] || continue
+
+            local cat_count=0
+            for uuid_dir in "$src_category"/*/; do
+                [ -d "$uuid_dir" ] || continue
+                local uuid
+                uuid=$(basename "$uuid_dir")
+                local dest_cat="$dest_base/$uuid/$category"
+                mkdir -p "$dest_cat"
+
+                while IFS= read -r -d '' src_file; do
+                    local basename
+                    basename=$(basename "$src_file")
+                    local dest_file="$dest_cat/$basename"
+                    backup_existing "$dest_file"
+                    cp "$src_file" "$dest_file"
+                    RESTORED_FILES+=("$dest_file")
+                    ((cat_count++)) || true
+                done < <(find "$uuid_dir" -type f -print0 2>/dev/null)
+            done
+
+            if [ "$cat_count" -gt 0 ]; then
+                log_detail "    ${category}: $cat_count file(s)"
+                ((proj_count += cat_count)) || true
+            fi
+        done
+
         ((total_count += proj_count)) || true
     done
 
@@ -474,19 +498,25 @@ main() {
     fi
     echo ""
 
-    if prompt_restore "Plans"; then
-        restore_plans
-    else
-        log_info "Skipped plans"
-    fi
-    echo ""
+    # User-content categories (plans, commands, agents, output-styles, rules, hooks,
+    # scheduled-tasks). Only prompt for ones that actually exist in the backup so
+    # users aren't asked about categories they've never used.
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        local uc_name="${entry%%:*}"
+        local uc_glob="${entry#*:}"
+        local uc_src="$BACKUP_DIR/$uc_name"
 
-    if prompt_restore "Commands"; then
-        restore_commands
-    else
-        log_info "Skipped commands"
-    fi
-    echo ""
+        if [ ! -d "$uc_src" ] || [ -z "$(find "$uc_src" -type f 2>/dev/null | head -1)" ]; then
+            continue
+        fi
+
+        if prompt_restore "$uc_name"; then
+            restore_user_content "$uc_name" "$uc_glob"
+        else
+            log_info "Skipped $uc_name"
+        fi
+        echo ""
+    done
 
     if [ "$INCLUDE_TODOS" = "true" ]; then
         if prompt_restore "Todos"; then
@@ -526,7 +556,11 @@ main() {
         done
 
         # Show restored subdirectories with file counts
-        for subdir in skills plugins plans commands todos projects; do
+        local summary_dirs=(skills plugins todos projects)
+        for uc_entry in "${USER_CONTENT_DIRS[@]}"; do
+            summary_dirs+=("${uc_entry%%:*}")
+        done
+        for subdir in "${summary_dirs[@]}"; do
             local full_dir="$CLAUDE_DIR/$subdir"
             if [ -d "$full_dir" ]; then
                 local file_count
