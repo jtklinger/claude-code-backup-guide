@@ -110,12 +110,21 @@ git push -u origin main
 git clone git@github.com:YOUR_USER/claude-code-backup.git
 cd claude-code-backup
 
+# Preview what would change without writing anything (recommended first run
+# on a laptop that already has a Claude Code install):
+bash /path/to/claude-code-backup-guide/scripts/restore.sh . --dry-run
+
 # Interactive restore (prompts for each category)
 bash /path/to/claude-code-backup-guide/scripts/restore.sh .
 
 # Or non-interactive (restore everything)
 bash /path/to/claude-code-backup-guide/scripts/restore.sh . --yes
 ```
+
+`--dry-run` scans every file the restore would touch and classifies it as
+**NEW** (destination doesn't exist), **CHANGED** (destination differs), or
+**SAME** (identical to backup). Nothing is written. Run this before a real
+restore to see exactly which existing files would be overwritten.
 
 ## Detailed Instructions
 
