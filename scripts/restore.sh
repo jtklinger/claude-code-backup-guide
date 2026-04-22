@@ -7,10 +7,14 @@
 # settings, MCP config, skills, plugins, plans, commands,
 # todos, and per-project data with interactive prompts.
 #
-# Usage: bash restore.sh [backup-directory] [--yes]
+# Usage: bash restore.sh [backup-directory] [--yes] [--dry-run]
 #
 # Options:
-#   --yes    Non-interactive mode (skip all prompts, restore everything)
+#   --yes        Non-interactive mode (skip all prompts, restore everything)
+#   --dry-run    Scan only — report which files would be created, changed, or
+#                left alone. Writes nothing. Implies --yes so the full picture
+#                is shown in one pass. Useful before restoring to a laptop
+#                that already has a Claude Code install.
 
 set -e
 
@@ -23,8 +27,26 @@ NC='\033[0m'
 
 # Global state
 AUTO_YES=false
+DRY_RUN=false
 RESTORED_FILES=()
 RESTORED_DIRS=()
+
+# Dry-run classification buckets — one array per category
+DRYRUN_NEW=()
+DRYRUN_CHANGED=()
+DRYRUN_SAME=()
+
+# User-content directories restored via a generic loop.
+# Must match the list in backup.sh.
+USER_CONTENT_DIRS=(
+    "plans:*.md"
+    "commands:*.md"
+    "agents:*"
+    "output-styles:*"
+    "rules:*"
+    "hooks:*"
+    "scheduled-tasks:*"
+)
 
 # Timestamp for log lines
 log_ts() {
@@ -116,6 +138,39 @@ prompt_restore() {
     esac
 }
 
+# Either copy the file (normal mode) or classify the change (dry-run mode).
+# In dry-run mode the file is never written; only classification counters
+# and on-screen NEW/CHANGED lines are emitted.
+report_or_copy() {
+    local src="$1"
+    local dest="$2"
+
+    if [ "$DRY_RUN" = "true" ]; then
+        if [ ! -f "$dest" ]; then
+            DRYRUN_NEW+=("$dest")
+            local src_size
+            src_size=$(wc -c < "$src" 2>/dev/null | tr -d ' ')
+            echo -e "    ${GREEN}NEW${NC}      $dest (${src_size} bytes)"
+        elif cmp -s "$src" "$dest"; then
+            DRYRUN_SAME+=("$dest")
+            # Unchanged files are silent by default — shown only in summary
+        else
+            DRYRUN_CHANGED+=("$dest")
+            local src_size dest_size
+            src_size=$(wc -c < "$src" 2>/dev/null | tr -d ' ')
+            dest_size=$(wc -c < "$dest" 2>/dev/null | tr -d ' ')
+            echo -e "    ${YELLOW}CHANGED${NC}  $dest (${dest_size} -> ${src_size} bytes)"
+        fi
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$dest")"
+    backup_existing "$dest"
+    cp "$src" "$dest"
+    RESTORED_FILES+=("$dest")
+    return 0
+}
+
 # Copy a single file from backup to destination, with backup_existing
 restore_file() {
     local src="$1"
@@ -125,10 +180,7 @@ restore_file() {
         return 1
     fi
 
-    mkdir -p "$(dirname "$dest")"
-    backup_existing "$dest"
-    cp "$src" "$dest"
-    RESTORED_FILES+=("$dest")
+    report_or_copy "$src" "$dest"
     return 0
 }
 
@@ -215,20 +267,19 @@ restore_skills() {
     fi
 
     local count=0
-    mkdir -p "$dest_dir"
+    if [ "$DRY_RUN" != "true" ]; then
+        mkdir -p "$dest_dir"
+    fi
 
     while IFS= read -r -d '' src_file; do
         local rel_path="${src_file#$source_dir/}"
         local dest_file="$dest_dir/$rel_path"
-        mkdir -p "$(dirname "$dest_file")"
-        backup_existing "$dest_file"
-        cp "$src_file" "$dest_file"
-        RESTORED_FILES+=("$dest_file")
+        report_or_copy "$src_file" "$dest_file"
         ((count++)) || true
     done < <(find "$source_dir" -type f -not -path '*/.git/*' -print0 2>/dev/null)
 
     RESTORED_DIRS+=("$dest_dir")
-    log_info "  Skills: $count file(s) restored"
+    log_info "  Skills: $count file(s) processed"
 }
 
 restore_plugins() {
@@ -257,54 +308,34 @@ restore_plugins() {
     fi
 }
 
-restore_plans() {
-    log_info "Restoring plans..."
-    local source_dir="$BACKUP_DIR/plans"
-    local dest_dir="$CLAUDE_DIR/plans"
+restore_user_content() {
+    local name="$1"
+    local glob="${2:-*}"
+    local source_dir="$BACKUP_DIR/$name"
+    local dest_dir="$CLAUDE_DIR/$name"
+
+    log_info "Restoring $name..."
 
     if [ ! -d "$source_dir" ]; then
-        log_warn "  No plans/ directory found in backup, skipping"
+        log_warn "  No $name/ directory found in backup, skipping"
         return 0
     fi
 
     local count=0
     mkdir -p "$dest_dir"
 
-    for md_file in "$source_dir"/*.md; do
-        [ -f "$md_file" ] || continue
-        local basename
-        basename=$(basename "$md_file")
-        if restore_file "$md_file" "$dest_dir/$basename"; then
+    # Walk the backup dir recursively so nested structure (e.g. scheduled-tasks/<task>/SKILL.md)
+    # is preserved on restore.
+    while IFS= read -r -d '' src_file; do
+        local rel_path="${src_file#$source_dir/}"
+        local dest_file="$dest_dir/$rel_path"
+        mkdir -p "$(dirname "$dest_file")"
+        if restore_file "$src_file" "$dest_file"; then
             ((count++)) || true
         fi
-    done
+    done < <(find "$source_dir" -type f -name "$glob" -print0 2>/dev/null)
 
-    log_info "  Plans: $count file(s) restored"
-}
-
-restore_commands() {
-    log_info "Restoring commands..."
-    local source_dir="$BACKUP_DIR/commands"
-    local dest_dir="$CLAUDE_DIR/commands"
-
-    if [ ! -d "$source_dir" ]; then
-        log_warn "  No commands/ directory found in backup, skipping"
-        return 0
-    fi
-
-    local count=0
-    mkdir -p "$dest_dir"
-
-    for md_file in "$source_dir"/*.md; do
-        [ -f "$md_file" ] || continue
-        local basename
-        basename=$(basename "$md_file")
-        if restore_file "$md_file" "$dest_dir/$basename"; then
-            ((count++)) || true
-        fi
-    done
-
-    log_info "  Commands: $count file(s) restored"
+    log_info "  $name: $count file(s) restored"
 }
 
 restore_todos() {
@@ -361,17 +392,16 @@ restore_projects() {
         local proj_count=0
 
         log_detail "  Project: $project"
-        mkdir -p "$dest_base"
+        if [ "$DRY_RUN" != "true" ]; then
+            mkdir -p "$dest_base"
+        fi
 
         # Restore memory files
         if [ -d "$src_base/memory" ]; then
             while IFS= read -r -d '' src_file; do
                 local rel_path="${src_file#$src_base/memory/}"
                 local dest_file="$dest_base/memory/$rel_path"
-                mkdir -p "$(dirname "$dest_file")"
-                backup_existing "$dest_file"
-                cp "$src_file" "$dest_file"
-                RESTORED_FILES+=("$dest_file")
+                report_or_copy "$src_file" "$dest_file"
                 ((proj_count++)) || true
             done < <(find "$src_base/memory" -type f -print0 2>/dev/null)
             log_detail "    Memory: $proj_count file(s)"
@@ -386,19 +416,49 @@ restore_projects() {
                 local basename
                 basename=$(basename "$src_file")
                 local dest_file="$dest_base/$basename"
-                backup_existing "$dest_file"
-                cp "$src_file" "$dest_file"
-                RESTORED_FILES+=("$dest_file")
+                report_or_copy "$src_file" "$dest_file"
                 ((session_count++)) || true
             done < <(find "$src_base/sessions" -type f \( -name "*.jsonl" -o -name "*.meta.json" \) -print0 2>/dev/null)
             ((proj_count += session_count)) || true
             log_detail "    Sessions: $session_count file(s) -> project root"
         fi
 
+        # Restore per-session nested data: backup layout is
+        # projects/<hash>/<category>/<session-uuid>/<file>, restored to
+        # projects/<hash>/<session-uuid>/<category>/<file>.
+        for category in subagents tool-results; do
+            local src_category="$src_base/$category"
+            [ -d "$src_category" ] || continue
+
+            local cat_count=0
+            for uuid_dir in "$src_category"/*/; do
+                [ -d "$uuid_dir" ] || continue
+                local uuid
+                uuid=$(basename "$uuid_dir")
+                local dest_cat="$dest_base/$uuid/$category"
+                if [ "$DRY_RUN" != "true" ]; then
+                    mkdir -p "$dest_cat"
+                fi
+
+                while IFS= read -r -d '' src_file; do
+                    local basename
+                    basename=$(basename "$src_file")
+                    local dest_file="$dest_cat/$basename"
+                    report_or_copy "$src_file" "$dest_file"
+                    ((cat_count++)) || true
+                done < <(find "$uuid_dir" -type f -print0 2>/dev/null)
+            done
+
+            if [ "$cat_count" -gt 0 ]; then
+                log_detail "    ${category}: $cat_count file(s)"
+                ((proj_count += cat_count)) || true
+            fi
+        done
+
         ((total_count += proj_count)) || true
     done
 
-    log_info "  Projects total: $total_count file(s) restored"
+    log_info "  Projects total: $total_count file(s) processed"
 }
 
 # ─── Main Flow ──────────────────────────────────────────────────────
@@ -410,6 +470,10 @@ main() {
         case "$arg" in
             --yes|-y)
                 AUTO_YES=true
+                ;;
+            --dry-run|-n)
+                DRY_RUN=true
+                AUTO_YES=true  # No point prompting when nothing will be written
                 ;;
             *)
                 positional_args+=("$arg")
@@ -429,7 +493,13 @@ main() {
     echo "==============================="
     echo ""
 
-    if [ "$AUTO_YES" = "true" ]; then
+    if [ "$DRY_RUN" = "true" ]; then
+        log_warn "DRY RUN mode: scanning only — no files will be written."
+        log_info "  NEW     = file does not exist at destination"
+        log_info "  CHANGED = file exists and differs from the backup"
+        log_info "  (unchanged files are silent; counted in summary)"
+        echo ""
+    elif [ "$AUTO_YES" = "true" ]; then
         log_info "Non-interactive mode (--yes): all categories will be restored"
         echo ""
     fi
@@ -437,10 +507,15 @@ main() {
     # Parse config
     parse_config
 
-    # Create claude dir if missing
+    # Create claude dir if missing (skip in dry-run — we're not writing anything)
     if [ ! -d "$CLAUDE_DIR" ]; then
-        log_info "Creating Claude Code directory: $CLAUDE_DIR"
-        mkdir -p "$CLAUDE_DIR"
+        if [ "$DRY_RUN" = "true" ]; then
+            log_warn "Claude Code directory does not exist: $CLAUDE_DIR"
+            log_warn "  (would be created during a real restore)"
+        else
+            log_info "Creating Claude Code directory: $CLAUDE_DIR"
+            mkdir -p "$CLAUDE_DIR"
+        fi
     fi
 
     echo ""
@@ -474,19 +549,25 @@ main() {
     fi
     echo ""
 
-    if prompt_restore "Plans"; then
-        restore_plans
-    else
-        log_info "Skipped plans"
-    fi
-    echo ""
+    # User-content categories (plans, commands, agents, output-styles, rules, hooks,
+    # scheduled-tasks). Only prompt for ones that actually exist in the backup so
+    # users aren't asked about categories they've never used.
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        local uc_name="${entry%%:*}"
+        local uc_glob="${entry#*:}"
+        local uc_src="$BACKUP_DIR/$uc_name"
 
-    if prompt_restore "Commands"; then
-        restore_commands
-    else
-        log_info "Skipped commands"
-    fi
-    echo ""
+        if [ ! -d "$uc_src" ] || [ -z "$(find "$uc_src" -type f 2>/dev/null | head -1)" ]; then
+            continue
+        fi
+
+        if prompt_restore "$uc_name"; then
+            restore_user_content "$uc_name" "$uc_glob"
+        else
+            log_info "Skipped $uc_name"
+        fi
+        echo ""
+    done
 
     if [ "$INCLUDE_TODOS" = "true" ]; then
         if prompt_restore "Todos"; then
@@ -506,8 +587,39 @@ main() {
     fi
     echo ""
 
-    # ─── Verification Summary ───────────────────────────────────────
+    # ─── Summary ────────────────────────────────────────────────────
     echo ""
+
+    if [ "$DRY_RUN" = "true" ]; then
+        echo -e "${GREEN}Dry Run Summary${NC}"
+        echo "================="
+        echo ""
+        echo -e "  ${GREEN}NEW${NC}      ${#DRYRUN_NEW[@]} file(s) would be created"
+        echo -e "  ${YELLOW}CHANGED${NC}  ${#DRYRUN_CHANGED[@]} file(s) would overwrite existing content"
+        echo "  SAME     ${#DRYRUN_SAME[@]} file(s) identical to backup (timestamp-backed-up then re-copied)"
+        echo ""
+
+        if [ "${#DRYRUN_CHANGED[@]}" -gt 0 ]; then
+            log_warn "${#DRYRUN_CHANGED[@]} existing file(s) would be overwritten."
+            log_warn "Each existing file is first copied to <file>.backup.<timestamp> before overwrite."
+            echo ""
+
+            # Flag claude.json specifically — overwriting nukes OAuth tokens
+            for f in "${DRYRUN_CHANGED[@]}"; do
+                if [[ "$f" == *"/.claude.json" ]]; then
+                    log_warn "NOTE: ~/.claude.json is in the CHANGED set — restoring will replace"
+                    log_warn "      OAuth tokens on this machine. You'll need to re-authenticate."
+                    echo ""
+                    break
+                fi
+            done
+        fi
+
+        echo "Run without --dry-run to apply the changes."
+        log_info "Dry run complete."
+        return 0
+    fi
+
     echo -e "${GREEN}Restore Verification Summary${NC}"
     echo "=============================="
 
@@ -526,7 +638,11 @@ main() {
         done
 
         # Show restored subdirectories with file counts
-        for subdir in skills plugins plans commands todos projects; do
+        local summary_dirs=(skills plugins todos projects)
+        for uc_entry in "${USER_CONTENT_DIRS[@]}"; do
+            summary_dirs+=("${uc_entry%%:*}")
+        done
+        for subdir in "${summary_dirs[@]}"; do
             local full_dir="$CLAUDE_DIR/$subdir"
             if [ -d "$full_dir" ]; then
                 local file_count

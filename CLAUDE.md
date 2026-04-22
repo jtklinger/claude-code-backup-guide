@@ -10,7 +10,7 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 
 - `scripts/init.sh` — First-time setup: scans `~/.claude/projects/`, generates `backup-config.json`
 - `scripts/backup.sh` — Non-interactive backup (cron-safe): reads config, copies changed files, auto-commits, optionally pushes
-- `scripts/restore.sh` — Interactive restore with per-category prompts (`--yes` for unattended)
+- `scripts/restore.sh` — Interactive restore with per-category prompts (`--yes` for unattended; `--dry-run` to preview NEW/CHANGED/SAME classification without writing anything)
 - `templates/.gitignore` — Recommended `.gitignore` for user backup repositories
 - `templates/backup-config.json` — Default config template
 - `docs/plans/` — Design documents
@@ -28,7 +28,9 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 
 ## Data Categories
 
-The backup covers: global settings, MCP config, skills, plugins (registry only), plans, commands, todos, per-project memory, and session transcripts. See `docs/plans/2026-03-05-backup-v2-design.md` for the full data model.
+The backup covers: global settings, MCP config, skills, plugins (registry only), user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), todos, per-project memory, session transcripts, subagent transcripts, and session tool-result payloads. See `docs/plans/2026-03-05-backup-v2-design.md` for the full data model.
+
+User-content directories are driven by a shared `USER_CONTENT_DIRS` array in `backup.sh` and `restore.sh` (format `"name:glob"`) — adding a new category is one edit per script. Subagent transcripts and tool-results live under `projects/<hash>/<session-uuid>/{subagents,tool-results}/` on disk and are stored in the backup at `projects/<hash>/{subagents,tool-results}/<session-uuid>/`.
 
 ## Testing Changes
 
