@@ -10,7 +10,7 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 
 - `scripts/init.sh` — First-time setup: scans `~/.claude/projects/`, generates `backup-config.json`
 - `scripts/backup.sh` — Non-interactive backup (cron-safe): reads config, copies changed files, auto-commits, optionally pushes
-- `scripts/restore.sh` — Interactive restore with per-category prompts (`--yes` for unattended)
+- `scripts/restore.sh` — Interactive restore with per-category prompts (`--yes` for unattended; `--dry-run` to preview NEW/CHANGED/SAME classification without writing anything)
 - `templates/.gitignore` — Recommended `.gitignore` for user backup repositories
 - `templates/backup-config.json` — Default config template
 - `docs/plans/` — Design documents
