@@ -26,10 +26,22 @@ COUNTS_GLOBAL=0
 COUNTS_MCP=0
 COUNTS_SKILLS=0
 COUNTS_PLUGINS=0
-COUNTS_PLANS=0
-COUNTS_COMMANDS=0
 COUNTS_TODOS=0
 COUNTS_PROJECTS=0
+declare -A USER_CONTENT_COUNTS
+
+# User-content directories backed up via a generic loop.
+# Format: "<dir-name>:<file-glob>" — glob filters which files to sync.
+# Add new categories here as Claude Code introduces them.
+USER_CONTENT_DIRS=(
+    "plans:*.md"
+    "commands:*.md"
+    "agents:*"
+    "output-styles:*"
+    "rules:*"
+    "hooks:*"
+    "scheduled-tasks:*"
+)
 
 # Timestamp for log lines
 log_ts() {
@@ -291,36 +303,28 @@ backup_plugins() {
     log_info "  Plugins: $count file(s) processed"
 }
 
-backup_plans() {
-    log_info "Backing up plans..."
-    local source_dir="$CLAUDE_DIR/plans"
-    local dest_dir="$BACKUP_DIR/plans"
+backup_user_content() {
+    log_info "Backing up user content directories..."
 
-    if [ ! -d "$source_dir" ] || [ -z "$(ls -A "$source_dir"/*.md 2>/dev/null)" ]; then
-        log_warn "  Plans directory empty or missing, skipping"
-        return 0
-    fi
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        local name="${entry%%:*}"
+        local glob="${entry#*:}"
+        local source_dir="$CLAUDE_DIR/$name"
+        local dest_dir="$BACKUP_DIR/$name"
 
-    local count
-    count=$(sync_directory "$source_dir" "$dest_dir" "*.md")
-    COUNTS_PLANS=$(find "$dest_dir" -type f -name "*.md" 2>/dev/null | wc -l)
-    log_info "  Plans: $COUNTS_PLANS file(s)"
-}
+        if [ ! -d "$source_dir" ]; then
+            continue
+        fi
 
-backup_commands() {
-    log_info "Backing up commands..."
-    local source_dir="$CLAUDE_DIR/commands"
-    local dest_dir="$BACKUP_DIR/commands"
+        sync_directory "$source_dir" "$dest_dir" "$glob" >/dev/null
 
-    if [ ! -d "$source_dir" ] || [ -z "$(ls -A "$source_dir"/*.md 2>/dev/null)" ]; then
-        log_warn "  Commands directory empty or missing, skipping"
-        return 0
-    fi
-
-    local count
-    count=$(sync_directory "$source_dir" "$dest_dir" "*.md")
-    COUNTS_COMMANDS=$(find "$dest_dir" -type f -name "*.md" 2>/dev/null | wc -l)
-    log_info "  Commands: $COUNTS_COMMANDS file(s)"
+        local count=0
+        if [ -d "$dest_dir" ]; then
+            count=$(find "$dest_dir" -type f -name "$glob" 2>/dev/null | wc -l)
+        fi
+        USER_CONTENT_COUNTS["$name"]=$count
+        log_info "  $name: $count file(s)"
+    done
 }
 
 backup_todos() {
@@ -415,6 +419,52 @@ backup_projects() {
             ((total_count += session_count)) || true
             log_info "    Sessions: $session_count file(s)"
         fi
+
+        # Copy per-session nested data: <session-uuid>/subagents/ and <session-uuid>/tool-results/
+        # Claude Code stores subagent transcripts and tool-result payloads inside a
+        # subdirectory named after the parent session UUID.
+        for category in subagents tool-results; do
+            local category_count=0
+            local category_dest="$dest_base/$category"
+
+            for session_dir in "$source_dir"/*/; do
+                [ -d "$session_dir" ] || continue
+                local uuid
+                uuid=$(basename "$session_dir")
+                # Skip the memory/ dir which is handled separately
+                [ "$uuid" = "memory" ] && continue
+
+                local src_category="$session_dir$category"
+                [ -d "$src_category" ] || continue
+
+                local dest_uuid="$category_dest/$uuid"
+                sync_directory "$src_category" "$dest_uuid" "*" >/dev/null
+
+                local uuid_count=0
+                if [ -d "$dest_uuid" ]; then
+                    uuid_count=$(find "$dest_uuid" -type f 2>/dev/null | wc -l)
+                fi
+                ((category_count += uuid_count)) || true
+            done
+
+            # Remove stale <uuid>/ subdirectories for sessions that no longer exist in source
+            if [ -d "$category_dest" ]; then
+                for uuid_dir in "$category_dest"/*/; do
+                    [ -d "$uuid_dir" ] || continue
+                    local uuid
+                    uuid=$(basename "$uuid_dir")
+                    if [ ! -d "$source_dir/$uuid/$category" ]; then
+                        rm -rf "$uuid_dir"
+                        CHANGES_MADE=true
+                    fi
+                done
+            fi
+
+            if [ "$category_count" -gt 0 ]; then
+                log_info "    ${category}: $category_count file(s)"
+                ((total_count += category_count)) || true
+            fi
+        done
     done
 
     COUNTS_PROJECTS=$total_count
@@ -535,8 +585,15 @@ copy_safe_files() {
         log_info "  Copied keybindings.json"
     fi
 
-    # Copy entire directories that are safe as-is
-    for category in skills plugins plans commands; do
+    # Copy entire directories that are safe as-is.
+    # Skills and plugins are always safe (no user-identifying content).
+    # User-content dirs are defined in USER_CONTENT_DIRS and may contain personal
+    # context — the export README flags them for review before sharing.
+    local safe_dirs=(skills plugins)
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        safe_dirs+=("${entry%%:*}")
+    done
+    for category in "${safe_dirs[@]}"; do
         if [ -d "$src_dir/$category" ]; then
             mkdir -p "$dest_dir/$category"
             cp -r "$src_dir/$category/." "$dest_dir/$category/"
@@ -614,6 +671,11 @@ This is a sanitized export of Claude Code settings, safe for sharing.
 | Plugins | `plugins/` | Plugin registry |
 | Plans | `plans/` | Saved implementation plans |
 | Commands | `commands/` | Custom slash commands |
+| Subagents | `agents/` | Custom subagent definitions (if any) |
+| Output styles | `output-styles/` | Custom output style definitions (if any) |
+| Rules | `rules/` | Topic-scoped instruction files (if any) |
+| Hooks | `hooks/` | Hook scripts referenced by `settings.json` (if any) |
+| Scheduled tasks | `scheduled-tasks/` | User-defined scheduled task skills (if any) |
 | Project memory | `projects/` | Per-project context (if selected) |
 
 ## What was redacted
@@ -623,6 +685,14 @@ This is a sanitized export of Claude Code settings, safe for sharing.
 - **MCP permission names:** Server-specific names replaced with `<server>` pattern
 - **Account data:** OAuth tokens, user IDs, email addresses removed entirely
 - **App state:** Runtime counters, caches, and analytics data removed
+
+## Review before sharing
+
+User-content directories are **copied as-is** and may contain personal context:
+
+- `plans/`, `scheduled-tasks/`, `agents/`, `hooks/`, `rules/` — may reference your
+  infrastructure, names, or internal systems. Review each file before publishing.
+- `commands/`, `output-styles/` — typically generic, but worth a scan.
 
 ## Setup instructions
 
@@ -714,8 +784,7 @@ main() {
     backup_mcp_config
     backup_skills
     backup_plugins
-    backup_plans
-    backup_commands
+    backup_user_content
     backup_todos
     backup_projects
 
@@ -723,12 +792,16 @@ main() {
     log_info "Backup Summary"
     echo "  Global settings: $COUNTS_GLOBAL"
     echo "  MCP config:      $COUNTS_MCP"
-    echo "  Skills:           $COUNTS_SKILLS"
-    echo "  Plugins:          $COUNTS_PLUGINS"
-    echo "  Plans:            $COUNTS_PLANS"
-    echo "  Commands:         $COUNTS_COMMANDS"
-    echo "  Todos:            $COUNTS_TODOS"
-    echo "  Projects:         $COUNTS_PROJECTS"
+    echo "  Skills:          $COUNTS_SKILLS"
+    echo "  Plugins:         $COUNTS_PLUGINS"
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        local name="${entry%%:*}"
+        local count="${USER_CONTENT_COUNTS[$name]:-0}"
+        # Pad name to fixed width for alignment
+        printf "  %-16s %s\n" "${name}:" "$count"
+    done
+    echo "  Todos:           $COUNTS_TODOS"
+    echo "  Projects:        $COUNTS_PROJECTS"
     echo ""
 
     # Git operations
@@ -740,7 +813,11 @@ main() {
     fi
 
     # Stage specific backup directories (only dirs that might exist)
-    for dir in global skills plugins plans commands todos projects; do
+    local stage_dirs=(global skills plugins todos projects)
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        stage_dirs+=("${entry%%:*}")
+    done
+    for dir in "${stage_dirs[@]}"; do
         if [ -d "$BACKUP_DIR/$dir" ]; then
             git add "$BACKUP_DIR/$dir" 2>/dev/null || true
         fi
