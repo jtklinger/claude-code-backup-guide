@@ -1,11 +1,14 @@
 #!/bin/bash
 
-# Claude Code Settings Restore Script v2
+# Claude Code Settings Restore Script
 #
 # Config-driven restore of all Claude Code data categories.
 # Reads backup-config.json from the repo root and restores
-# settings, MCP config, skills, plugins, plans, commands,
-# todos, and per-project data with interactive prompts.
+# settings, MCP config, skills, plugins, user-content dirs
+# (plans, commands, agents, output-styles, rules, hooks,
+# scheduled-tasks), todos, and per-project data (including
+# subagent transcripts and tool-result payloads) with
+# interactive prompts.
 #
 # Usage: bash restore.sh [backup-directory] [--yes] [--dry-run]
 #
@@ -17,6 +20,8 @@
 #                that already has a Claude Code install.
 
 set -e
+
+SCRIPT_VERSION="2.1.0"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -489,8 +494,8 @@ main() {
         BACKUP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     fi
 
-    echo -e "${GREEN}Claude Code Restore Script v2${NC}"
-    echo "==============================="
+    echo -e "${GREEN}Claude Code Restore Script v${SCRIPT_VERSION}${NC}"
+    echo "==================================="
     echo ""
 
     if [ "$DRY_RUN" = "true" ]; then

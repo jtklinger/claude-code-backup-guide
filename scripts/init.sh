@@ -1,6 +1,6 @@
 #!/bin/bash
 
-# Claude Code Backup v2 — First-Time Setup Script
+# Claude Code Backup — First-Time Setup Script
 #
 # Initializes a backup repository by scanning ~/.claude/projects/,
 # letting you select which projects to include, and generating
@@ -11,6 +11,8 @@
 # Example: bash init.sh ~/claude-code-backup
 
 set -e
+
+SCRIPT_VERSION="2.1.0"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -32,8 +34,8 @@ BACKUP_DIR="$(cd "$BACKUP_DIR" 2>/dev/null && pwd)" || {
 
 CLAUDE_DIR="$HOME/.claude"
 
-echo -e "${GREEN}Claude Code Backup v2 — Init${NC}"
-echo "=============================="
+echo -e "${GREEN}Claude Code Backup — Init v${SCRIPT_VERSION}${NC}"
+echo "==================================="
 echo ""
 
 # ─── Pre-flight checks ───────────────────────────────────────────────

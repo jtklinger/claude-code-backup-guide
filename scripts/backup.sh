@@ -1,17 +1,21 @@
 #!/bin/bash
 
-# Claude Code Settings Backup Script v2
+# Claude Code Settings Backup Script
 #
 # Config-driven backup of all Claude Code data categories.
 # Reads backup-config.json from the repo root and backs up
-# settings, MCP config, skills, plugins, plans, commands,
-# todos, and per-project data.
+# settings, MCP config, skills, plugins, user-content dirs
+# (plans, commands, agents, output-styles, rules, hooks,
+# scheduled-tasks), todos, and per-project data including
+# subagent transcripts and tool-result payloads.
 #
 # Usage: bash backup.sh [backup-directory] [--sanitize <output-directory>]
 #
 # Fully non-interactive — safe for cron.
 
 set -e
+
+SCRIPT_VERSION="2.1.0"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -772,8 +776,8 @@ main() {
         BACKUP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     fi
 
-    echo -e "${GREEN}Claude Code Backup Script v2${NC}"
-    echo "=============================="
+    echo -e "${GREEN}Claude Code Backup Script v${SCRIPT_VERSION}${NC}"
+    echo "=================================="
     echo ""
 
     # Parse config
