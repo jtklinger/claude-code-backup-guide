@@ -1,6 +1,6 @@
 # Claude Code Backup & Restore Guide
 
-**Current release: v2.1.0** (see [changelog](#changelog))
+**Current release: v2.2.0** (see [changelog](#changelog))
 
 A config-driven system for backing up and restoring your complete Claude Code environment — settings, memory, skills, plugins, user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), sessions, subagent transcripts, tool-result payloads, and more.
 
@@ -40,12 +40,14 @@ The v2 system backs up every category of Claude Code data that matters for porta
 |----------|----------------|------------------|-------------|
 | Global instructions | `~/.claude/CLAUDE.md` | `global/` | Custom instructions for all sessions |
 | Extra context files | `~/.claude/*.md` | `global/` | Additional markdown context files |
+| Root scripts | `~/.claude/*.{cmd,ps1,js,sh,py}` | `global/` | Custom scripts (MCP helpers, unlock scripts, etc.) — v2.2+ |
 | Settings | `~/.claude/settings.json` | `global/` | Basic settings (e.g., alwaysThinkingEnabled) |
 | Local settings | `~/.claude/settings.local.json` | `global/` | Permission rules and advanced settings |
 | Keybindings | `~/.claude/keybindings.json` | `global/` | Custom key bindings |
 | MCP config | `~/.claude.json` | `global/claude.json` | MCP server definitions, OAuth tokens, app state |
 | Skills | `~/.claude/skills/` | `skills/` | User-installed skill packages |
 | Plugins | `~/.claude/plugins/` | `plugins/` | Plugin registry (installed_plugins.json, blocklist.json, known_marketplaces.json) |
+| Plugin data | `~/.claude/plugins/data/` | `plugins/data/` | Persistent plugin state (pdf-viewer, superpowers, etc.) — v2.2+ |
 | Plans | `~/.claude/plans/` | `plans/` | Saved implementation plans |
 | Custom commands | `~/.claude/commands/` | `commands/` | User-defined slash commands |
 | Subagents | `~/.claude/agents/` | `agents/` | Custom subagent definitions (v2.1+) |
@@ -531,6 +533,12 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ## Changelog
 
+### v2.2.0 (2026-06-23)
+
+- **New: root script backup.** `backup_global_settings()` now captures `~/.claude/*.{cmd,ps1,js,sh,py}` in addition to `*.md` files. Covers MCP helper scripts, unlock scripts, and migration tools users drop in the Claude root.
+- **New: plugin data backup.** `backup_plugin_data()` copies `~/.claude/plugins/data/` to `plugins/data/` with a 50 MB size-guard warning. Covers persistent plugin state (pdf-viewer annotations, superpowers preferences, etc.).
+- **No config schema changes** — existing `backup-config.json` (version `1`) continues to work without edits.
+
 ### v2.1.0 (2026-04-21)
 
 - **New backed-up categories:** `~/.claude/scheduled-tasks/` (user-defined scheduled task skills) and per-session nested data — `<session-uuid>/subagents/` (subagent transcripts) and `<session-uuid>/tool-results/` (large tool-call payloads).
@@ -624,24 +632,4 @@ This tool uses two distinct version numbers, which move independently:
 | **Script version** (`SCRIPT_VERSION="2.1.0"` in each script, printed in the banner) | `scripts/*.sh` | Every release. Follows [SemVer](https://semver.org): major for breaking changes to invocation or output layout, minor for new features, patch for bug fixes. |
 | **Config schema version** (`"version": 1` in `backup-config.json`) | `backup-config.json`, enforced at parse time | Only when the config file format changes in a backwards-incompatible way. Currently `1`. |
 
-If you're reporting an issue, include the script version from the banner (e.g. `Claude Code Backup Script v2.1.0`) — it's the fastest way to confirm what code you're running.
-
-## Additional Resources
-
-- [Backup Script](scripts/backup.sh)
-- [Restore Script](scripts/restore.sh)
-- [Init Script](scripts/init.sh)
-- [.gitignore Template](templates/.gitignore)
-- [backup-config.json Template](templates/backup-config.json)
-
-## Contributing
-
-Found an issue or have an improvement? Please:
-
-1. Fork this repository
-2. Create a feature branch
-3. Submit a pull request
-
-## License
-
-MIT License - Feel free to use and modify as needed.
+If you're reporting an issue, include the script ve
