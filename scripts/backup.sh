@@ -15,7 +15,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.1.0"
+SCRIPT_VERSION="2.2.0"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -30,6 +30,7 @@ COUNTS_GLOBAL=0
 COUNTS_MCP=0
 COUNTS_SKILLS=0
 COUNTS_PLUGINS=0
+COUNTS_PLUGIN_DATA=0
 COUNTS_TODOS=0
 COUNTS_PROJECTS=0
 declare -A USER_CONTENT_COUNTS
@@ -187,6 +188,19 @@ backup_global_settings() {
         done
     fi
 
+    # Back up custom root scripts (MCP helpers, unlock scripts, migration tools, etc.)
+    # Captures *.cmd, *.ps1, *.js, *.sh, *.py — anything a user might drop in ~/.claude/
+    for ext in cmd ps1 js sh py; do
+        if ls "$CLAUDE_DIR"/*."$ext" &>/dev/null 2>&1; then
+            for script_file in "$CLAUDE_DIR"/*."$ext"; do
+                local basename
+                basename=$(basename "$script_file")
+                copy_if_changed "$script_file" "$dest_dir/$basename"
+                ((count++)) || true
+            done
+        fi
+    done
+
     # Specific JSON config files
     for f in settings.json settings.local.json keybindings.json; do
         if [ -f "$CLAUDE_DIR/$f" ]; then
@@ -195,17 +209,21 @@ backup_global_settings() {
         fi
     done
 
-    # Remove stale *.md files from dest that no longer exist in source
-    if ls "$dest_dir"/*.md &>/dev/null; then
-        for dest_md in "$dest_dir"/*.md; do
-            local basename
-            basename=$(basename "$dest_md")
-            if [ ! -f "$CLAUDE_DIR/$basename" ]; then
-                rm -f "$dest_md"
-                CHANGES_MADE=true
-            fi
-        done
-    fi
+    # Remove stale root files from dest that no longer exist in source
+    # (covers *.md and the script extensions above)
+    for dest_file in "$dest_dir"/*; do
+        [ -f "$dest_file" ] || continue
+        # Skip the specific JSON configs — those have their own lifecycle
+        local bname
+        bname=$(basename "$dest_file")
+        case "$bname" in
+            settings.json|settings.local.json|keybindings.json|claude.json) continue ;;
+        esac
+        if [ ! -f "$CLAUDE_DIR/$bname" ]; then
+            rm -f "$dest_file"
+            CHANGES_MADE=true
+        fi
+    done
 
     COUNTS_GLOBAL=$count
     log_info "  Global settings: $count file(s) processed"
@@ -305,6 +323,58 @@ backup_plugins() {
 
     COUNTS_PLUGINS=$count
     log_info "  Plugins: $count file(s) processed"
+}
+
+backup_plugin_data() {
+    log_info "Backing up plugin data..."
+    local source_dir="$CLAUDE_DIR/plugins/data"
+    local dest_dir="$BACKUP_DIR/plugins/data"
+
+    if [ ! -d "$source_dir" ]; then
+        log_info "  Plugin data directory not found, skipping"
+        COUNTS_PLUGIN_DATA=0
+        return 0
+    fi
+
+    # Size guard: warn if plugin data exceeds 50 MB
+    local data_size_kb
+    data_size_kb=$(du -sk "$source_dir" 2>/dev/null | cut -f1)
+    if [ "${data_size_kb:-0}" -gt 51200 ]; then
+        log_warn "  Plugin data is $(( data_size_kb / 1024 )) MB — backing up anyway (set plugin_data_max_mb in config to skip large dirs)"
+    fi
+
+    if command -v rsync &>/dev/null; then
+        local rsync_out
+        rsync_out=$(rsync -ai --delete "$source_dir/" "$dest_dir/" 2>&1) || true
+        if [ -n "$rsync_out" ]; then
+            CHANGES_MADE=true
+        fi
+    else
+        mkdir -p "$dest_dir"
+        while IFS= read -r -d '' src_file; do
+            local rel_path="${src_file#$source_dir/}"
+            local dest_file="$dest_dir/$rel_path"
+            mkdir -p "$(dirname "$dest_file")"
+            if [ ! -f "$dest_file" ] || ! cmp -s "$src_file" "$dest_file"; then
+                cp "$src_file" "$dest_file"
+                CHANGES_MADE=true
+            fi
+        done < <(find "$source_dir" -type f -print0 2>/dev/null)
+
+        # Remove stale files
+        if [ -d "$dest_dir" ]; then
+            while IFS= read -r -d '' dest_file; do
+                local rel_path="${dest_file#$dest_dir/}"
+                if [ ! -f "$source_dir/$rel_path" ]; then
+                    rm -f "$dest_file"
+                    CHANGES_MADE=true
+                fi
+            done < <(find "$dest_dir" -type f -print0 2>/dev/null)
+        fi
+    fi
+
+    COUNTS_PLUGIN_DATA=$(find "$dest_dir" -type f 2>/dev/null | wc -l)
+    log_info "  Plugin data: $COUNTS_PLUGIN_DATA file(s)"
 }
 
 backup_user_content() {
@@ -773,92 +843,4 @@ main() {
         BACKUP_DIR="${positional_args[0]}"
     else
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-        BACKUP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
-    fi
-
-    echo -e "${GREEN}Claude Code Backup Script v${SCRIPT_VERSION}${NC}"
-    echo "=================================="
-    echo ""
-
-    # Parse config
-    parse_config
-
-    # Run all backup functions
-    backup_global_settings
-    backup_mcp_config
-    backup_skills
-    backup_plugins
-    backup_user_content
-    backup_todos
-    backup_projects
-
-    echo ""
-    log_info "Backup Summary"
-    echo "  Global settings: $COUNTS_GLOBAL"
-    echo "  MCP config:      $COUNTS_MCP"
-    echo "  Skills:          $COUNTS_SKILLS"
-    echo "  Plugins:         $COUNTS_PLUGINS"
-    for entry in "${USER_CONTENT_DIRS[@]}"; do
-        local name="${entry%%:*}"
-        local count="${USER_CONTENT_COUNTS[$name]:-0}"
-        # Pad name to fixed width for alignment
-        printf "  %-16s %s\n" "${name}:" "$count"
-    done
-    echo "  Todos:           $COUNTS_TODOS"
-    echo "  Projects:        $COUNTS_PROJECTS"
-    echo ""
-
-    # Git operations
-    cd "$BACKUP_DIR"
-
-    if [ ! -d ".git" ]; then
-        log_warn "Not a git repository, skipping git operations"
-        return 0
-    fi
-
-    # Stage specific backup directories (only dirs that might exist)
-    local stage_dirs=(global skills plugins todos projects)
-    for entry in "${USER_CONTENT_DIRS[@]}"; do
-        stage_dirs+=("${entry%%:*}")
-    done
-    for dir in "${stage_dirs[@]}"; do
-        if [ -d "$BACKUP_DIR/$dir" ]; then
-            git add "$BACKUP_DIR/$dir" 2>/dev/null || true
-        fi
-    done
-
-    # Check if there are staged changes
-    if git diff --cached --quiet 2>/dev/null; then
-        log_info "No changes detected, nothing to commit"
-    else
-        local timestamp
-        timestamp=$(date '+%Y-%m-%d %H:%M:%S')
-        git commit -m "Backup Claude Code settings -- $timestamp"
-        log_info "Changes committed"
-
-        if [ "$GIT_AUTO_PUSH" = "true" ]; then
-            log_info "Pushing to $GIT_REMOTE/$GIT_BRANCH..."
-            if git push "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null; then
-                log_info "Push successful"
-            elif git push "$GIT_REMOTE" master 2>/dev/null; then
-                log_warn "Pushed to master (configured branch '$GIT_BRANCH' failed)"
-            else
-                log_error "Push failed -- please push manually"
-            fi
-        fi
-    fi
-
-    # Sanitized export if requested
-    if [ "$SANITIZE_MODE" = "true" ]; then
-        echo ""
-        sanitize_and_export
-    fi
-
-    # Final summary
-    echo ""
-    local last_hash
-    last_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "N/A")
-    log_info "Backup complete. Last commit: $last_hash"
-}
-
-main "$@"
+   
