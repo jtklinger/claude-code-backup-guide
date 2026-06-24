@@ -63,23 +63,24 @@ The new Task Scheduler entry point (replaces the direct `bash` action).
 2. Record start time.
 3. Convert `BackupDir` to a bash path and run, capturing merged stdout+stderr and the exit code:
    `& $BashExe -l -c "bash '<backup.sh>' '<bash-backupdir>'"`
+   **Capture `$LASTEXITCODE` immediately on the next line** into a variable — do **not** rely on PowerShell's `$?` or try/catch to detect bash failure. `backup.sh` runs under `set -e`, so a mid-script failure (and the v2.2.0 `exit 2` parse case) surfaces **only** as a non-zero `$LASTEXITCODE`, never as a thrown PowerShell exception. Any statement executed before the capture can reset `$LASTEXITCODE`.
 4. Write the day's log file: header (ISO start time, hostname, script version) + full captured output + footer (exit code, duration seconds).
 5. Rotate: delete `backup-*.log` older than `RetentionDays`.
 6. Write the Windows Event Log entry (source `ClaudeCodeBackup`, log `Application`):
    - exit 0 → Information, event ID **1000**, message "Backup succeeded in {N}s. Log: {path}"
    - exit ≠ 0 → Error, event ID **1001**, message "Backup FAILED (exit {code}) in {N}s. Log: {path}"
-7. Write `last-run.json` (overwrite): `{ lastRunIso, exitCode, result, lastSuccessIso, logPath, scriptVersion }` where `result` is `"success"|"failure"` and `lastSuccessIso` is updated **only** on success (otherwise carried forward from the previous file).
+7. Write `last-run.json` (overwrite): `{ lastRunIso, exitCode, result, lastSuccessIso, logPath, scriptVersion }` where `result` is `"success"|"failure"` and `lastSuccessIso` is updated **only** on success (otherwise carried forward from the previous file; if no prior success exists — e.g. the first-ever run failed — it is written as `null`, which the watchdog treats as stale).
 8. On failure only: show a toast — title "Claude Code backup FAILED", body "Exit {code}. See {logPath}".
 9. `exit <bash exit code>` so Task Scheduler's `LastTaskResult` stays truthful.
 
 ## Component: `backup-watchdog.ps1`
 
-Read-only missed-run detector. **Parameter:** `-MaxAgeHours` (default 13 = 12h cadence + 1h grace).
+Read-only missed-run detector. **Parameter:** `-MaxAgeHours` (default 13). Semantics: "warn if we've now skipped roughly one scheduled slot." Because runs are at fixed 07:00/19:00 wall-clock times, the gap between two *successful* runs is ~12h, so 13h = 12h cadence + 1h grace. This is **not** "warn 1h after a run was due" — after a normal 19:00 success the watchdog stays quiet until ~08:00, which correctly flags a skipped 07:00 run without false alarms.
 
 **Steps:**
-1. Read `last-run.json`. If missing or unparseable → treat as stale/unknown.
-2. Compute `age = now − lastSuccessIso`.
-3. If the file is missing, OR `age > MaxAgeHours`, OR the last result was `failure` → toast (title "Claude Code backup may be stale", body "No successful backup since {lastSuccessIso} — last result: {result}") + Event Log Warning, event ID **2000**.
+1. Read `last-run.json`. If missing, unparseable, **or `lastSuccessIso` is null/empty** (e.g. the first-ever run failed, so no success has ever been recorded) → treat as stale and warn.
+2. Otherwise compute `age = now − lastSuccessIso`.
+3. If `age > MaxAgeHours` OR the last result was `failure` → toast (title "Claude Code backup may be stale", body "No successful backup since {lastSuccessIso, or 'never'} — last result: {result}") + Event Log Warning, event ID **2000**.
 4. Otherwise: silent (no toast, no event).
 
 The watchdog never runs the backup itself.
