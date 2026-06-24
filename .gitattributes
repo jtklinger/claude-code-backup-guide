@@ -1,0 +1,5 @@
+# Shell scripts must always use LF line endings, on every platform.
+# A Windows editor/tool flipping these to CRLF — combined with a truncated
+# write — is what broke v2.2.0's backup.sh (it failed to parse, so the
+# scheduled backup silently did nothing). Enforcing LF here prevents a recurrence.
+*.sh text eol=lf

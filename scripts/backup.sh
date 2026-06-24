@@ -15,7 +15,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.2.0"
+SCRIPT_VERSION="2.2.1"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -843,4 +843,94 @@ main() {
         BACKUP_DIR="${positional_args[0]}"
     else
         SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-   
+        BACKUP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
+    fi
+
+    echo -e "${GREEN}Claude Code Backup Script v${SCRIPT_VERSION}${NC}"
+    echo "=================================="
+    echo ""
+
+    # Parse config
+    parse_config
+
+    # Run all backup functions
+    backup_global_settings
+    backup_mcp_config
+    backup_skills
+    backup_plugins
+    backup_plugin_data
+    backup_user_content
+    backup_todos
+    backup_projects
+
+    echo ""
+    log_info "Backup Summary"
+    echo "  Global settings: $COUNTS_GLOBAL"
+    echo "  MCP config:      $COUNTS_MCP"
+    echo "  Skills:          $COUNTS_SKILLS"
+    echo "  Plugins:         $COUNTS_PLUGINS"
+    echo "  Plugin data:     ${COUNTS_PLUGIN_DATA:-0}"
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        local name="${entry%%:*}"
+        local count="${USER_CONTENT_COUNTS[$name]:-0}"
+        # Pad name to fixed width for alignment
+        printf "  %-16s %s\n" "${name}:" "$count"
+    done
+    echo "  Todos:           $COUNTS_TODOS"
+    echo "  Projects:        $COUNTS_PROJECTS"
+    echo ""
+
+    # Git operations
+    cd "$BACKUP_DIR"
+
+    if [ ! -d ".git" ]; then
+        log_warn "Not a git repository, skipping git operations"
+        return 0
+    fi
+
+    # Stage specific backup directories (only dirs that might exist)
+    local stage_dirs=(global skills plugins todos projects)
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        stage_dirs+=("${entry%%:*}")
+    done
+    for dir in "${stage_dirs[@]}"; do
+        if [ -d "$BACKUP_DIR/$dir" ]; then
+            git add "$BACKUP_DIR/$dir" 2>/dev/null || true
+        fi
+    done
+
+    # Check if there are staged changes
+    if git diff --cached --quiet 2>/dev/null; then
+        log_info "No changes detected, nothing to commit"
+    else
+        local timestamp
+        timestamp=$(date '+%Y-%m-%d %H:%M:%S')
+        git commit -m "Backup Claude Code settings -- $timestamp"
+        log_info "Changes committed"
+
+        if [ "$GIT_AUTO_PUSH" = "true" ]; then
+            log_info "Pushing to $GIT_REMOTE/$GIT_BRANCH..."
+            if git push "$GIT_REMOTE" "$GIT_BRANCH" 2>/dev/null; then
+                log_info "Push successful"
+            elif git push "$GIT_REMOTE" master 2>/dev/null; then
+                log_warn "Pushed to master (configured branch '$GIT_BRANCH' failed)"
+            else
+                log_error "Push failed -- please push manually"
+            fi
+        fi
+    fi
+
+    # Sanitized export if requested
+    if [ "$SANITIZE_MODE" = "true" ]; then
+        echo ""
+        sanitize_and_export
+    fi
+
+    # Final summary
+    echo ""
+    local last_hash
+    last_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "N/A")
+    log_info "Backup complete. Last commit: $last_hash"
+}
+
+main "$@"
