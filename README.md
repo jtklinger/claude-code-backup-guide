@@ -1,6 +1,6 @@
 # Claude Code Backup & Restore Guide
 
-**Current release: v2.2.0** (see [changelog](#changelog))
+**Current release: v2.2.1** (see [changelog](#changelog))
 
 A config-driven system for backing up and restoring your complete Claude Code environment — settings, memory, skills, plugins, user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), sessions, subagent transcripts, tool-result payloads, and more.
 
@@ -532,6 +532,13 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 **A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version.
 
 ## Changelog
+
+### v2.2.1 (2026-06-23)
+
+- **Critical fix: v2.2.0 shipped a broken `backup.sh`.** The v2.2.0 commit truncated `backup.sh` partway through `main()` — the entire backup body (every `backup_*` call, change detection, commit, and push) was missing — and flipped every script to CRLF line endings. `bash` could not parse the file, so it exited with status 2 and the scheduled backup silently did nothing: no error surfaced, no commit, no push. **Anyone on v2.2.0 should upgrade immediately.**
+- **Restored the complete `main()`** — all backup steps (including the new `backup_plugin_data`), the summary, change detection, commit, and push now run as intended.
+- **Normalized line endings to LF** across all three scripts and added a `.gitattributes` rule (`*.sh text eol=lf`) so a CRLF flip cannot recur.
+- **No config schema changes** — existing `backup-config.json` (version `1`) continues to work without edits.
 
 ### v2.2.0 (2026-06-23)
 

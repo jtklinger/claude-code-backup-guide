@@ -28,7 +28,7 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 
 ## Data Categories
 
-The backup covers: global settings, MCP config, skills, plugins (registry only), user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), todos, per-project memory, session transcripts, subagent transcripts, and session tool-result payloads. See `docs/plans/2026-03-05-backup-v2-design.md` for the full data model.
+The backup covers: global settings (incl. custom root scripts like `*.cmd`/`*.ps1`/`*.sh`), MCP config, skills, plugins (registry + plugin data under `plugins/data/`), user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), todos, per-project memory, session transcripts, subagent transcripts, and session tool-result payloads. See `docs/plans/2026-03-05-backup-v2-design.md` for the full data model.
 
 User-content directories are driven by a shared `USER_CONTENT_DIRS` array in `backup.sh` and `restore.sh` (format `"name:glob"`) — adding a new category is one edit per script. Subagent transcripts and tool-results live under `projects/<hash>/<session-uuid>/{subagents,tool-results}/` on disk and are stored in the backup at `projects/<hash>/{subagents,tool-results}/<session-uuid>/`.
 
