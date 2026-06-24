@@ -217,10 +217,8 @@ Expected: `exit=0`; a `backup-YYYY-MM-DD.log` exists with the backup output; `la
 - [ ] **Step 4: Smoke-verify FAILURE path**
 
 ```powershell
-$broken = "$env:TEMP\broken.sh"; "exit 2" | Set-Content $broken -Encoding ascii
+# Run against a dir with no backup-config.json so backup.sh exits non-zero:
 & C:\Users\jtkli\projects\claude-code-backup-guide\scripts\windows\backup-wrapper.ps1 -BackupDir $env:TEMP
-# (Above still runs the real backup.sh against $env:TEMP, which has no config -> non-zero. To force the
-#  pure exit-code path instead, temporarily test by pointing the inner command at $broken — see note.)
 "exit=$LASTEXITCODE"
 Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 1 | Format-List EventID,EntryType,Message
 Get-Content "$env:LOCALAPPDATA\ClaudeCodeBackup\last-run.json"
@@ -459,7 +457,7 @@ Get-Content "$env:LOCALAPPDATA\ClaudeCodeBackup\last-run.json"      # result=suc
 ```
 Expected: `LastTaskResult = 0`, a 1000 event, a fresh log file, `result=success`. This is the exact path that silently failed in the v2.2.0 incident — now fully observable.
 
-- [ ] **Step 3: Re-run the bash smoke test** (`references/smoke-test.md`) once to confirm `backup.sh` itself is unregressed (it was only version-bumped).
+- [ ] **Step 3: Re-run the bash smoke test** once to confirm `backup.sh` itself is unregressed (it was only version-bumped). Use the recipe in `CLAUDE.md` → "Testing Changes" (canonical version: the `claude-code-backup-maintenance` skill's smoke-test reference): `mkdir /tmp/test-backup && bash scripts/init.sh /tmp/test-backup && bash scripts/backup.sh /tmp/test-backup`, then a second `bash scripts/backup.sh /tmp/test-backup` should report "No changes detected". Cleanup: `rm -rf /tmp/test-backup`.
 
 - [ ] **Step 4: Cut the v2.3.0 release** via the `claude-code-backup-maintenance` skill's cut-release workflow: push branch → PR → merge to master → tag `v2.3.0` → GitHub Release. (Pushing/publishing is gated on explicit user approval per the user's standing rule.)
 
