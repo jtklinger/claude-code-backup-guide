@@ -357,8 +357,12 @@ $wdAction  = New-ScheduledTaskAction -Execute $ps `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$watchdog`""
 $tLogon    = New-ScheduledTaskTrigger -AtLogOn -User $user
 $tRepeat   = New-ScheduledTaskTrigger -Once -At (Get-Date)
-$tRepeat.Repetition.Interval = "PT4H"
-$tRepeat.Repetition.Duration = ""            # empty = repeat indefinitely
+# A fresh -Once trigger has a null .Repetition — build the pattern via its CIM class.
+$repClass  = Get-CimClass -Namespace ROOT/Microsoft/Windows/TaskScheduler -ClassName MSFT_TaskRepetitionPattern
+$rep       = New-CimInstance -CimClass $repClass -ClientOnly
+$rep.Interval = "PT4H"
+$rep.StopAtDurationEnd = $false
+$tRepeat.Repetition = $rep
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable
 Register-ScheduledTask -TaskName $WatchdogTaskName -Action $wdAction `
@@ -370,7 +374,7 @@ Write-Host "  (Get-ScheduledTask '$BackupTaskName').Actions"
 Write-Host "  Get-ScheduledTaskInfo '$WatchdogTaskName'"
 ```
 
-> Implementation caveat to validate during execution: the exact way to express an **indefinitely repeating** 4h trigger via `New-ScheduledTaskTrigger` varies by Windows build. The `$tRepeat.Repetition.Interval = "PT4H"` (ISO-8601 duration) approach above is the most portable; if `Register-ScheduledTask` rejects it, fall back to building the trigger with a long finite duration (e.g. `Duration = "P9999D"`). Confirm the registered task shows a 4-hour repetition.
+> **Resolved during execution:** a fresh `New-ScheduledTaskTrigger -Once` has a **null** `.Repetition`, so assigning `.Repetition.Interval` throws ("The property 'Interval' cannot be found on this object") and aborts the install. The installer builds the repetition via the `MSFT_TaskRepetitionPattern` CIM class (shown above), which registers a 4-hour indefinite repetition correctly.
 
 - [ ] **Step 2: Smoke-verify install is idempotent + correct**
 
