@@ -2,11 +2,13 @@
 # Warns (toast + Warning event) if no SUCCESSFUL backup within -MaxAgeHours, or if the
 # last run failed, or if no success has ever been recorded. Never runs the backup itself.
 [CmdletBinding()]
-param([int]$MaxAgeHours = 13)
+param([int]$MaxAgeHours = 13, [string]$BackupDir = "C:\Users\me\claude-code-backup")
 
 $EventSource = 'ClaudeCodeBackup'
 . (Join-Path $PSScriptRoot 'toast.ps1')
-$stateFile = Join-Path $env:LOCALAPPDATA "ClaudeCodeBackup\last-run.json"
+# Must match backup-wrapper.ps1's state location (next to the backup repo, not %LOCALAPPDATA%,
+# which the packaged Claude desktop app virtualizes inconsistently across contexts).
+$stateFile = Join-Path (Split-Path $BackupDir -Parent) 'claude-code-backup-logs\last-run.json'
 
 function Write-BackupEvent {
     param([string]$EntryType, [int]$Id, [string]$Message)
