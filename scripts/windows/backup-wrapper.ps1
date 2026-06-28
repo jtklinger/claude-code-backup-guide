@@ -5,7 +5,7 @@
 param(
     [string]$BackupDir     = "C:\Users\jtkli\claude-code-backup",
     [string]$BashExe       = $null,
-    [string]$LogDir        = (Join-Path $env:LOCALAPPDATA "ClaudeCodeBackup\logs"),
+    [string]$StateDir      = $null,
     [int]   $RetentionDays = 14
 )
 
@@ -42,7 +42,13 @@ function ConvertTo-BashPath {
 }
 
 $start     = Get-Date
-$stateFile = Join-Path (Split-Path $LogDir -Parent) 'last-run.json'
+# State + logs live next to the backup repo, NOT under %LOCALAPPDATA%: the packaged (MSIX) Claude
+# desktop app virtualizes %LOCALAPPDATA% to a per-package LocalCache, so an AppData path resolves
+# inconsistently between the scheduled task and other contexts. A path derived from -BackupDir is
+# stable everywhere (the backup repo dir is writable + non-virtualized in every context).
+if (-not $StateDir) { $StateDir = Join-Path (Split-Path $BackupDir -Parent) 'claude-code-backup-logs' }
+$LogDir    = Join-Path $StateDir 'logs'
+$stateFile = Join-Path $StateDir 'last-run.json'
 $logFile   = Join-Path $LogDir ("backup-{0:yyyy-MM-dd}.log" -f $start)
 
 try {
