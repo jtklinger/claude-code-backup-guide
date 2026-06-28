@@ -28,7 +28,9 @@ All new files under `scripts/windows/` (the portable bash scripts are untouched 
 | `scripts/{backup,init,restore}.sh` | `SCRIPT_VERSION` → `2.3.0` only |
 | `README.md`, `CLAUDE.md` | Changelog/callout + Windows pointer; data-flow note |
 
-State + logs live at `%LOCALAPPDATA%\ClaudeCodeBackup\` (`logs\backup-YYYY-MM-DD.log`, `last-run.json`) — outside both repos.
+State + logs live at `C:\Users\jtkli\claude-code-backup-logs\` (`logs\backup-YYYY-MM-DD.log`, `last-run.json`) — a sibling of the backup repo, outside both repos.
+
+> **Execution note (path moved off %LOCALAPPDATA%):** the original plan used `%LOCALAPPDATA%\ClaudeCodeBackup\`. The packaged Claude desktop app virtualizes `%LOCALAPPDATA%` (MSIX → per-package `LocalCache`), so the wrapper's state/logs landed inconsistently between the scheduled task and other contexts (the task's success state was unreadable by the watchdog). Both scripts now derive a stable non-AppData path next to the backup repo. The committed scripts are authoritative — the `%LOCALAPPDATA%` paths in the code blocks and verification commands below reflect the superseded original.
 
 ---
 

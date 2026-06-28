@@ -21,7 +21,7 @@ Re-running it is safe; it updates the tasks in place.
 
 ## Where things live
 
-- **Logs + state:** `%LOCALAPPDATA%\ClaudeCodeBackup\`
+- **Logs + state:** `C:\Users\jtkli\claude-code-backup-logs\` (a sibling of the backup repo — deliberately **not** under `%LOCALAPPDATA%`, which the packaged Claude desktop app virtualizes to a per-package `LocalCache`, making an AppData path resolve inconsistently between the scheduled task and other contexts)
   - `logs\backup-YYYY-MM-DD.log` — full captured output, one file per day, kept 14 days
   - `last-run.json` — `{ lastRunIso, exitCode, result, lastSuccessIso, logPath, scriptVersion }` (read by the watchdog)
 - **Event Log:** `Application` log, source `ClaudeCodeBackup`
@@ -61,5 +61,5 @@ Set-ScheduledTask -TaskName "Claude Code Backup" -Action $bash
 
 # Remove the Event Log source (elevated) and the logs/state
 Remove-EventLog -Source ClaudeCodeBackup        # run as administrator
-Remove-Item -Recurse -Force "$env:LOCALAPPDATA\ClaudeCodeBackup"
+Remove-Item -Recurse -Force "C:\Users\jtkli\claude-code-backup-logs"
 ```
