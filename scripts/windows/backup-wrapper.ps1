@@ -1,12 +1,16 @@
 # backup-wrapper.ps1 — Task Scheduler entry point.
 # Runs backup.sh via Git-bash, captures result, logs to file + Event Log + state, toasts on success and failure,
 # and re-emits the bash exit code so Task Scheduler's LastTaskResult stays truthful.
+#   -Fast    passes --fast to backup.sh (size+mtime change detection; faster on large data).
+#   -Silent  hides the console window so the run doesn't pop up on screen; toasts still show.
 [CmdletBinding()]
 param(
     [string]$BackupDir     = "C:\Users\jtkli\claude-code-backup",
     [string]$BashExe       = $null,
     [string]$StateDir      = $null,
-    [int]   $RetentionDays = 14
+    [int]   $RetentionDays = 14,
+    [switch]$Fast,
+    [switch]$Silent
 )
 
 # ErrorActionPreference is intentionally left at the default ('Continue'). backup.sh runs under
@@ -17,6 +21,7 @@ param(
 
 $EventSource = 'ClaudeCodeBackup'
 . (Join-Path $PSScriptRoot 'toast.ps1')
+if ($Silent) { Hide-ConsoleWindow }   # hide ASAP so the window doesn't linger on screen
 
 function Write-BackupEvent {
     param([string]$EntryType, [int]$Id, [string]$Message)
@@ -70,8 +75,9 @@ try {
     # Run the backup. Capture stdout+stderr, then read $LASTEXITCODE IMMEDIATELY (next line) —
     # backup.sh runs under `set -e`, so a failure (e.g. the v2.2.0 `exit 2`) surfaces ONLY as a
     # non-zero exit code, never a PowerShell exception. Do not use $? or try/catch to detect it.
-    $output = & $bash -l -c "bash '$bashScript' '$bashBackupDir'" 2>&1
-    $code   = $LASTEXITCODE
+    $fastArg = if ($Fast) { ' --fast' } else { '' }
+    $output  = & $bash -l -c "bash '$bashScript' '$bashBackupDir'$fastArg" 2>&1
+    $code    = $LASTEXITCODE
     $duration = [int]((Get-Date) - $start).TotalSeconds
 
     # --- log file ---
@@ -96,7 +102,8 @@ try {
         result         = if ($code -eq 0) { 'success' } else { 'failure' }
         lastSuccessIso = $lastSuccess
         logPath        = $logFile
-        scriptVersion  = '2.3.0'
+        fast           = [bool]$Fast
+        scriptVersion  = '2.4.0'
     } | ConvertTo-Json | Set-Content -Path $stateFile -Encoding utf8
 
     # --- Event Log + toast (success and failure) ---
@@ -104,8 +111,13 @@ try {
         Write-BackupEvent -EntryType Information -Id 1000 -Message "Backup succeeded in ${duration}s. Log: $logFile"
         Show-BackupToast -Title "Claude Code backup succeeded" -Body "Completed in ${duration}s."
     } else {
+        # Surface the cause at a glance: last non-empty output line, ANSI-stripped, length-capped.
+        $lastErr = ($output | Out-String) -split "`n" | Where-Object { $_.Trim() } | Select-Object -Last 1
+        if ($lastErr) { $lastErr = ($lastErr -replace '\x1b\[[0-9;]*m', '').Trim() }
+        $toastBody = if ($lastErr) { "Exit ${code}: $lastErr" } else { "Exit $code. See $logFile" }
+        if ($toastBody.Length -gt 150) { $toastBody = $toastBody.Substring(0, 147) + '...' }
         Write-BackupEvent -EntryType Error -Id 1001 -Message "Backup FAILED (exit $code) in ${duration}s. Log: $logFile"
-        Show-BackupToast -Title "Claude Code backup FAILED" -Body "Exit $code. See $logFile"
+        Show-BackupToast -Title "Claude Code backup FAILED" -Body $toastBody
     }
 
     exit $code
