@@ -1,0 +1,44 @@
+name: lint
+
+# Guards against the v2.2.0 failure mode: a syntax-broken / truncated script
+# reaching main and silently breaking every backup. `bash -n` is the hard gate
+# (a parse error == 100% silent backup failure). ShellCheck and PSScriptAnalyzer
+# run as advisory linters — promote them to blocking once a clean baseline holds.
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  shell:
+    name: Shell scripts (bash -n + shellcheck)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Syntax check (bash -n) — hard gate
+        run: |
+          set -e
+          for f in scripts/*.sh; do
+            echo "bash -n $f"
+            bash -n "$f"
+          done
+      - name: ShellCheck (advisory)
+        continue-on-error: true
+        run: shellcheck --severity=error scripts/*.sh
+
+  powershell:
+    name: PowerShell (PSScriptAnalyzer)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: PSScriptAnalyzer (Error severity) — advisory
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          Install-Module PSScriptAnalyzer -Force -Scope CurrentUser
+          $issues = Invoke-ScriptAnalyzer -Path scripts/windows -Recurse -Severity Error
+          if ($issues) {
+            $issues | Format-Table -AutoSize
+            throw "PSScriptAnalyzer found $($issues.Count) error-severity issue(s)"
+          }
+          Write-Host "No PSScriptAnalyzer errors."
