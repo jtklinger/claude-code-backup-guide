@@ -195,6 +195,8 @@ if ($code -eq 0) {
 exit $code
 ```
 
+> **Execution deviation (correctness fix):** the committed `scripts/windows/backup-wrapper.ps1` removes the global `$ErrorActionPreference = 'Stop'` and wraps the body in a try/catch. Under `Stop`, `& bash … 2>&1` wraps each stderr line in a `NativeCommandError` and **throws before `$LASTEXITCODE` is read** — turning a chatty-but-successful run (e.g. git push output) into a false failure with no log/event/toast. Default `Continue` lets stderr merge into the captured output without throwing; the try/catch provides fail-loud for genuine wrapper errors. The committed script is the authoritative version.
+
 - [ ] **Step 2: Register the Event Log source once (so the smoke checks below can write events)**
 
 Run **as Administrator**:
