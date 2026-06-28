@@ -18,12 +18,11 @@ at 07:00 and 19:00 daily. The bash `log_info/log_warn/log_error` helpers only `e
 
 ## Scope / Non-goals
 
-**In scope:** a Windows-only wrapper layer (PowerShell) that captures each run's result to a log file and the Windows Event Log, shows a toast on failure, and a watchdog that flags missed runs. Shipped as a v2.3.0 release of the tool.
+**In scope:** a Windows-only wrapper layer (PowerShell) that captures each run's result to a log file and the Windows Event Log, shows a toast on every run (success and failure), and a watchdog that flags missed runs. Shipped as a v2.3.0 release of the tool.
 
 **Non-goals (explicitly out):**
 - No changes to `backup.sh` / `restore.sh` / `init.sh` *logic* (only the shared `SCRIPT_VERSION` bumps, per the tool's versioning convention).
 - No server integration (Uptime Kuma, OpenObserve, email, ntfy) — desktop-only was chosen.
-- No success toasts (success is silent; failure toasts only).
 - No `uninstall.ps1` — manual removal is documented in the Windows README instead.
 
 ## Architecture
@@ -34,7 +33,7 @@ Task Scheduler ──► backup-wrapper.ps1 ──► (Git bash) backup.sh ─�
                         ├─► log file  (%LOCALAPPDATA%\ClaudeCodeBackup\logs\)
                         ├─► Windows Event Log  (Application / source "ClaudeCodeBackup")
                         ├─► last-run.json  (state for the watchdog)
-                        └─► toast  (failure only)
+                        └─► toast  (success + failure)
 
 (logon / every 4h) ──► backup-watchdog.ps1 ──► reads last-run.json ──► toast + Warning event if stale
 ```
@@ -70,7 +69,7 @@ The new Task Scheduler entry point (replaces the direct `bash` action).
    - exit 0 → Information, event ID **1000**, message "Backup succeeded in {N}s. Log: {path}"
    - exit ≠ 0 → Error, event ID **1001**, message "Backup FAILED (exit {code}) in {N}s. Log: {path}"
 7. Write `last-run.json` (overwrite): `{ lastRunIso, exitCode, result, lastSuccessIso, logPath, scriptVersion }` where `result` is `"success"|"failure"` and `lastSuccessIso` is updated **only** on success (otherwise carried forward from the previous file; if no prior success exists — e.g. the first-ever run failed — it is written as `null`, which the watchdog treats as stale).
-8. On failure only: show a toast — title "Claude Code backup FAILED", body "Exit {code}. See {logPath}".
+8. Show a toast on **both** outcomes: on success → title "Claude Code backup succeeded", body "Completed in {duration}s"; on failure → title "Claude Code backup FAILED", body "Exit {code}. See {logPath}".
 9. `exit <bash exit code>` so Task Scheduler's `LastTaskResult` stays truthful.
 
 ## Component: `backup-watchdog.ps1`
@@ -117,7 +116,7 @@ A shared helper exposing `Show-BackupToast -Title <t> -Body <b>`. Implementation
 
 ## Data flow
 
-- **Run:** Task fires → wrapper runs `backup.sh`, captures output+exit → writes {log file, Event Log, `last-run.json`} → toast iff failure → re-emits exit code → `LastTaskResult`.
+- **Run:** Task fires → wrapper runs `backup.sh`, captures output+exit → writes {log file, Event Log, `last-run.json`} → toast (success or failure) → re-emits exit code → `LastTaskResult`.
 - **Watch:** logon or 4h repetition → watchdog reads `last-run.json` → {toast + Warning event} iff stale.
 
 ## Error handling / edge cases
@@ -134,7 +133,7 @@ A shared helper exposing `Show-BackupToast -Title <t> -Body <b>`. Implementation
 
 The repo has no unit-test framework (bash side uses a smoke recipe); PowerShell here is verified the same way — manual smoke against real state:
 
-1. **Success:** run `backup-wrapper.ps1` manually → assert Event Log Information 1000 + a new day log file + `last-run.json` `result=success` + **no** toast + exit 0.
+1. **Success:** run `backup-wrapper.ps1` manually → assert Event Log Information 1000 + a new day log file + `last-run.json` `result=success` + a success toast + exit 0.
 2. **Failure:** run the wrapper pointed at a deliberately broken script (or one that `exit 2`s) → assert Event Log Error 1001 + toast shown + `last-run.json` `result=failure` + the non-zero exit code propagated to `$LASTEXITCODE`.
 3. **Watchdog stale:** set `last-run.json` `lastSuccessIso` to 14h ago → run `backup-watchdog.ps1` → assert Warning 2000 + toast. Reset to now → assert silent.
 4. **End-to-end:** trigger the real "Claude Code Backup" task → `LastTaskResult = 0` + Event Log + log + state all updated.

@@ -2,9 +2,9 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Give the Windows scheduled backup durable per-run logging (file + Event Log), a toast on failure, and a watchdog that catches missed runs — without touching the cross-platform `backup.sh`.
+**Goal:** Give the Windows scheduled backup durable per-run logging (file + Event Log), a toast on every run, and a watchdog that catches missed runs — without touching the cross-platform `backup.sh`.
 
-**Architecture:** A Windows-only PowerShell wrapper layer under `scripts/windows/`. Task Scheduler calls `backup-wrapper.ps1` (instead of `bash` directly); the wrapper runs Git-bash `backup.sh`, captures its output + exit code, and records the result to a daily log file, the Windows Event Log, and a `last-run.json` state file, toasting only on failure. A separate `backup-watchdog.ps1` (logon + every 4h) reads the state file and warns if no successful backup happened within ~13h. `install.ps1` wires it all up idempotently.
+**Architecture:** A Windows-only PowerShell wrapper layer under `scripts/windows/`. Task Scheduler calls `backup-wrapper.ps1` (instead of `bash` directly); the wrapper runs Git-bash `backup.sh`, captures its output + exit code, and records the result to a daily log file, the Windows Event Log, and a `last-run.json` state file, toasting on every run (success and failure). A separate `backup-watchdog.ps1` (logon + every 4h) reads the state file and warns if no successful backup happened within ~13h. `install.ps1` wires it all up idempotently.
 
 **Tech Stack:** Windows PowerShell 5.1, Windows Event Log (`Application` / source `ClaudeCodeBackup`), built-in `Windows.UI.Notifications` toasts (no BurntToast), `ScheduledTasks` cmdlets, Git-bash.
 
@@ -21,7 +21,7 @@ All new files under `scripts/windows/` (the portable bash scripts are untouched 
 | File | Responsibility |
 |------|----------------|
 | `scripts/windows/toast.ps1` | `Show-BackupToast -Title -Body` — the only shared helper; dot-sourced by wrapper + watchdog |
-| `scripts/windows/backup-wrapper.ps1` | Scheduled-task entry point: run `backup.sh`, capture, log (file + Event Log), state file, failure toast, re-emit exit code |
+| `scripts/windows/backup-wrapper.ps1` | Scheduled-task entry point: run `backup.sh`, capture, log (file + Event Log), state file, toast (success + failure), re-emit exit code |
 | `scripts/windows/backup-watchdog.ps1` | Read `last-run.json`, toast + Warning event if stale |
 | `scripts/windows/install.ps1` | Register Event Log source; repoint backup task at wrapper; create watchdog task (idempotent, elevated) |
 | `scripts/windows/README.md` | Setup, what is logged + where, manual removal |
@@ -95,7 +95,7 @@ git commit -m "Add Windows toast helper for backup notifications"
 
 ```powershell
 # backup-wrapper.ps1 — Task Scheduler entry point.
-# Runs backup.sh via Git-bash, captures result, logs to file + Event Log + state, toasts on failure,
+# Runs backup.sh via Git-bash, captures result, logs to file + Event Log + state, toasts on success and failure,
 # and re-emits the bash exit code so Task Scheduler's LastTaskResult stays truthful.
 [CmdletBinding()]
 param(
@@ -183,9 +183,10 @@ $lastSuccess = if ($code -eq 0) { $start.ToString('o') }
     scriptVersion  = '2.3.0'
 } | ConvertTo-Json | Set-Content -Path $stateFile -Encoding utf8
 
-# --- Event Log + failure toast ---
+# --- Event Log + toast (success and failure) ---
 if ($code -eq 0) {
     Write-BackupEvent -EntryType Information -Id 1000 -Message "Backup succeeded in ${duration}s. Log: $logFile"
+    Show-BackupToast -Title "Claude Code backup succeeded" -Body "Completed in ${duration}s."
 } else {
     Write-BackupEvent -EntryType Error -Id 1001 -Message "Backup FAILED (exit $code) in ${duration}s. Log: $logFile"
     Show-BackupToast -Title "Claude Code backup FAILED" -Body "Exit $code. See $logFile"
@@ -212,7 +213,7 @@ if (-not [System.Diagnostics.EventLog]::SourceExists('ClaudeCodeBackup')) {
 Get-Content "$env:LOCALAPPDATA\ClaudeCodeBackup\last-run.json"
 Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 1 | Format-List EventID,EntryType,Message
 ```
-Expected: `exit=0`; a `backup-YYYY-MM-DD.log` exists with the backup output; `last-run.json` shows `result=success` and a `lastSuccessIso`; newest event is **1000 / Information**; **no toast**.
+Expected: `exit=0`; a `backup-YYYY-MM-DD.log` exists with the backup output; `last-run.json` shows `result=success` and a `lastSuccessIso`; newest event is **1000 / Information**; **a "succeeded" toast appears** (confirm on screen).
 
 - [ ] **Step 4: Smoke-verify FAILURE path**
 
@@ -231,7 +232,7 @@ Expected: non-zero `exit`; newest event is **1001 / Error**; `last-run.json` `re
 
 ```bash
 git add scripts/windows/backup-wrapper.ps1
-git commit -m "Add Windows backup wrapper with file + Event Log logging and failure toast"
+git commit -m "Add Windows backup wrapper with file + Event Log logging and toast notifications"
 ```
 
 ---
@@ -422,7 +423,7 @@ grep -h '^SCRIPT_VERSION=' scripts/*.sh | sort -u   # expect a single line: 2.3.
 
 - [ ] **Step 2: Update `README.md`** — set the "Current release" callout to `v2.3.0`, add a changelog entry (headline: Windows logging & failure/missed-run alerts; note no schema change), and add a one-line pointer to `scripts/windows/README.md` in the Windows section.
 
-- [ ] **Step 3: Update `CLAUDE.md`** — add a sentence noting the optional Windows observability layer under `scripts/windows/` (wrapper + watchdog + installer) that logs to file + Event Log and toasts on failure; portable `backup.sh` is unchanged.
+- [ ] **Step 3: Update `CLAUDE.md`** — add a sentence noting the optional Windows observability layer under `scripts/windows/` (wrapper + watchdog + installer) that logs to file + Event Log and toasts on every run; portable `backup.sh` is unchanged.
 
 - [ ] **Step 4: Verify nothing bash-side regressed**
 
@@ -455,7 +456,7 @@ Start-ScheduledTask -TaskName "Claude Code Backup"
 Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 1 # expect 1000 / Information
 Get-Content "$env:LOCALAPPDATA\ClaudeCodeBackup\last-run.json"      # result=success, fresh lastSuccessIso
 ```
-Expected: `LastTaskResult = 0`, a 1000 event, a fresh log file, `result=success`. This is the exact path that silently failed in the v2.2.0 incident — now fully observable.
+Expected: `LastTaskResult = 0`, a 1000 event, a fresh log file, `result=success`, and a "succeeded" toast. This is the exact path that silently failed in the v2.2.0 incident — now fully observable.
 
 - [ ] **Step 3: Re-run the bash smoke test** once to confirm `backup.sh` itself is unregressed (it was only version-bumped). Use the recipe in `CLAUDE.md` → "Testing Changes" (canonical version: the `claude-code-backup-maintenance` skill's smoke-test reference): `mkdir /tmp/test-backup && bash scripts/init.sh /tmp/test-backup && bash scripts/backup.sh /tmp/test-backup`, then a second `bash scripts/backup.sh /tmp/test-backup` should report "No changes detected". Cleanup: `rm -rf /tmp/test-backup`.
 
@@ -466,7 +467,7 @@ Expected: `LastTaskResult = 0`, a 1000 event, a fresh log file, `result=success`
 ## Done when
 
 - All five `scripts/windows/` files exist and pass their smoke checks.
-- The real "Claude Code Backup" task runs through the wrapper, exits 0, and leaves a 1000 event + log + success state.
+- The real "Claude Code Backup" task runs through the wrapper, exits 0, and leaves a 1000 event + log + success state + a success toast.
 - A forced failure produces a 1001 event + toast + `result=failure` (with `lastSuccessIso` preserved).
 - The watchdog warns on a 14h-stale state and is silent on a fresh one.
 - `v2.3.0` is tagged + released (after user approval to push).
