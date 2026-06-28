@@ -4,7 +4,9 @@
 param(
     [string]$BackupDir        = "C:\Users\me\claude-code-backup",
     [string]$BackupTaskName   = "Claude Code Backup",
-    [string]$WatchdogTaskName = "Claude Code Backup Watchdog"
+    [string]$WatchdogTaskName = "Claude Code Backup Watchdog",
+    [switch]$Fast,    # bake --fast (size+mtime change detection) into the backup task
+    [switch]$Silent   # run both tasks with a hidden window (no pop-up); toasts still show
 )
 $ErrorActionPreference = 'Stop'
 $wrapper  = Join-Path $PSScriptRoot 'backup-wrapper.ps1'
@@ -19,14 +21,23 @@ if (-not [System.Diagnostics.EventLog]::SourceExists('ClaudeCodeBackup')) {
 } else { Write-Host "Event Log source already registered." }
 
 # 2. Repoint the existing backup task at the wrapper (preserves triggers + principal).
-$backupAction = New-ScheduledTaskAction -Execute $ps `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$wrapper`" -BackupDir `"$BackupDir`""
+#    -WindowStyle Hidden (PowerShell) + the wrapper's own Hide-ConsoleWindow give a
+#    no-pop-up run; -Fast enables size+mtime change detection in backup.sh.
+$backupPsArgs = "-NoProfile -ExecutionPolicy Bypass"
+if ($Silent) { $backupPsArgs += " -WindowStyle Hidden" }
+$backupPsArgs += " -File `"$wrapper`" -BackupDir `"$BackupDir`""
+if ($Fast)   { $backupPsArgs += " -Fast" }
+if ($Silent) { $backupPsArgs += " -Silent" }
+$backupAction = New-ScheduledTaskAction -Execute $ps -Argument $backupPsArgs
 Set-ScheduledTask -TaskName $BackupTaskName -Action $backupAction | Out-Null
-Write-Host "Repointed '$BackupTaskName' at backup-wrapper.ps1."
+Write-Host "Repointed '$BackupTaskName' at backup-wrapper.ps1 (Fast=$($Fast.IsPresent), Silent=$($Silent.IsPresent))."
 
 # 3. Create/update the watchdog task: at logon + every 4h, interactive, limited.
-$wdAction  = New-ScheduledTaskAction -Execute $ps `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$watchdog`""
+$wdPsArgs = "-NoProfile -ExecutionPolicy Bypass"
+if ($Silent) { $wdPsArgs += " -WindowStyle Hidden" }
+$wdPsArgs += " -File `"$watchdog`""
+if ($Silent) { $wdPsArgs += " -Silent" }
+$wdAction  = New-ScheduledTaskAction -Execute $ps -Argument $wdPsArgs
 $tLogon    = New-ScheduledTaskTrigger -AtLogOn -User $user
 $tRepeat   = New-ScheduledTaskTrigger -Once -At (Get-Date)
 # A fresh -Once trigger has a null .Repetition, so build the pattern via its CIM class

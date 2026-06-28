@@ -21,7 +21,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.3.0"
+SCRIPT_VERSION="2.4.0"
 
 # Colors for output
 GREEN='\033[0;32m'

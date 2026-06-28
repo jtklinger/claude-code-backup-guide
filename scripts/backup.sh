@@ -9,13 +9,19 @@
 # scheduled-tasks), todos, and per-project data including
 # subagent transcripts and tool-result payloads.
 #
-# Usage: bash backup.sh [backup-directory] [--sanitize <output-directory>]
+# Usage: bash backup.sh [backup-directory] [--fast] [--status] [--sanitize <output-directory>]
+#
+#   --fast   Detect changes by size + mtime instead of a full byte compare.
+#            Much faster over large, mostly-unchanged data (session transcripts).
+#            See is_unchanged() for the trade-off. Default is byte-exact (cmp).
+#   --status Print a health readout (last commit, remote sync, repo + .git size)
+#            for the backup directory and exit without backing up.
 #
 # Fully non-interactive — safe for cron.
 
 set -e
 
-SCRIPT_VERSION="2.3.0"
+SCRIPT_VERSION="2.4.0"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -26,6 +32,8 @@ NC='\033[0m'
 
 # Global state
 CHANGES_MADE=false
+FAST_COMPARE=false   # --fast: size+mtime change detection instead of byte-exact cmp
+STATUS_MODE=false    # --status: print a health readout and exit
 COUNTS_GLOBAL=0
 COUNTS_MCP=0
 COUNTS_SKILLS=0
@@ -109,6 +117,38 @@ parse_config() {
     log_info "Config loaded: claude_dir=$CLAUDE_DIR, ${#PROJECTS[@]} project(s)"
 }
 
+# is_unchanged <src> <dest> — 0 (skip, up to date) / 1 (must copy).
+#   Default: byte-exact compare (cmp -s). Always correct; reads every byte.
+#   --fast:  compare size + mtime only — ONE stat call covering BOTH files, zero
+#            byte reads. cmp reads both files end-to-end; this reads neither, so
+#            it is strictly cheaper per file over a large, mostly-unchanged corpus
+#            (session transcripts). Trade-off: a content change that preserves
+#            BOTH size and mtime is missed. Claude's session/todo files are
+#            append-only (size+mtime move with content), so this is safe in
+#            practice; the default stays byte-exact. GNU stat first (Linux +
+#            Windows Git Bash), BSD stat fallback (macOS).
+is_unchanged() {
+    local src="$1" dest="$2"
+    [ -f "$dest" ] || return 1
+    if [ "$FAST_COMPARE" = "true" ]; then
+        local meta m1 m2
+        meta=$(stat -c '%s:%Y' "$src" "$dest" 2>/dev/null) \
+            || meta=$(stat -f '%z:%m' "$src" "$dest" 2>/dev/null)
+        { read -r m1; read -r m2; } <<< "$meta"
+        [ -n "$m1" ] && [ "$m1" = "$m2" ]
+        return
+    fi
+    cmp -s "$src" "$dest"
+}
+
+# copy_file <src> <dest> — copy honoring the active mode. In --fast mode preserve
+# mtime (cp -p) so an unchanged file's mtime still matches its source on the NEXT
+# run and the fast skip-check stays stable. Plain cp would stamp "now", making
+# every file look changed each run and defeating the optimization.
+copy_file() {
+    if [ "$FAST_COMPARE" = "true" ]; then cp -p "$1" "$2"; else cp "$1" "$2"; fi
+}
+
 copy_if_changed() {
     local source="$1"
     local dest="$2"
@@ -120,11 +160,11 @@ copy_if_changed() {
 
     mkdir -p "$(dirname "$dest")"
 
-    if [ -f "$dest" ] && cmp -s "$source" "$dest"; then
+    if is_unchanged "$source" "$dest"; then
         return 0
     fi
 
-    cp "$source" "$dest"
+    copy_file "$source" "$dest"
     CHANGES_MADE=true
     return 0
 }
@@ -148,8 +188,8 @@ sync_directory() {
         local rel_path="${src_file#$source_dir/}"
         local dest_file="$dest_dir/$rel_path"
         mkdir -p "$(dirname "$dest_file")"
-        if [ ! -f "$dest_file" ] || ! cmp -s "$src_file" "$dest_file"; then
-            cp "$src_file" "$dest_file"
+        if ! is_unchanged "$src_file" "$dest_file"; then
+            copy_file "$src_file" "$dest_file"
             CHANGES_MADE=true
             ((copied++)) || true
         fi
@@ -273,8 +313,8 @@ backup_skills() {
             local rel_path="${src_file#$source_dir/}"
             local dest_file="$dest_dir/$rel_path"
             mkdir -p "$(dirname "$dest_file")"
-            if [ ! -f "$dest_file" ] || ! cmp -s "$src_file" "$dest_file"; then
-                cp "$src_file" "$dest_file"
+            if ! is_unchanged "$src_file" "$dest_file"; then
+                copy_file "$src_file" "$dest_file"
                 CHANGES_MADE=true
                 ((copied++)) || true
             fi
@@ -355,8 +395,8 @@ backup_plugin_data() {
             local rel_path="${src_file#$source_dir/}"
             local dest_file="$dest_dir/$rel_path"
             mkdir -p "$(dirname "$dest_file")"
-            if [ ! -f "$dest_file" ] || ! cmp -s "$src_file" "$dest_file"; then
-                cp "$src_file" "$dest_file"
+            if ! is_unchanged "$src_file" "$dest_file"; then
+                copy_file "$src_file" "$dest_file"
                 CHANGES_MADE=true
             fi
         done < <(find "$source_dir" -type f -print0 2>/dev/null)
@@ -811,6 +851,42 @@ sanitize_and_export() {
     log_info "Export complete: $total_files files in $SANITIZE_DIR"
 }
 
+# ─── Status ─────────────────────────────────────────────────────────
+
+show_status() {
+    echo -e "${GREEN}Claude Code Backup — Status (v${SCRIPT_VERSION})${NC}"
+    echo "=============================================="
+    if [ ! -d "$BACKUP_DIR" ]; then
+        log_error "Backup directory not found: $BACKUP_DIR"
+        exit 1
+    fi
+    cd "$BACKUP_DIR"
+    echo "  Backup dir:    $BACKUP_DIR"
+    if [ -d .git ]; then
+        local branch local_head remote_head
+        branch=$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "?")
+        echo "  Last commit:   $(git log -1 --format='%h  %ci' 2>/dev/null || echo none)"
+        echo "  Commit msg:    $(git log -1 --format='%s' 2>/dev/null || echo none)"
+        echo "  Total commits: $(git rev-list --count HEAD 2>/dev/null || echo '?')"
+        echo "  Branch:        $branch"
+        if git rev-parse --verify -q "origin/$branch" >/dev/null 2>&1; then
+            local_head=$(git rev-parse HEAD 2>/dev/null)
+            remote_head=$(git rev-parse "origin/$branch" 2>/dev/null)
+            if [ "$local_head" = "$remote_head" ]; then
+                echo "  Remote:        in sync with origin/$branch"
+            else
+                echo "  Remote:        OUT OF SYNC with origin/$branch (unpushed or behind)"
+            fi
+        else
+            echo "  Remote:        no origin/$branch tracking info"
+        fi
+    else
+        log_warn "  Not a git repository"
+    fi
+    echo "  Working tree:  $(du -sh --exclude=.git . 2>/dev/null | cut -f1)"
+    echo "  Git history:   $(du -sh .git 2>/dev/null | cut -f1)"
+}
+
 # ─── Main Flow ──────────────────────────────────────────────────────
 
 main() {
@@ -831,6 +907,14 @@ main() {
                 SANITIZE_DIR="$2"
                 shift 2
                 ;;
+            --fast)
+                FAST_COMPARE=true
+                shift
+                ;;
+            --status)
+                STATUS_MODE=true
+                shift
+                ;;
             *)
                 positional_args+=("$1")
                 shift
@@ -846,12 +930,21 @@ main() {
         BACKUP_DIR="$(cd "$SCRIPT_DIR/.." && pwd)"
     fi
 
+    if [ "$STATUS_MODE" = "true" ]; then
+        show_status
+        exit 0
+    fi
+
     echo -e "${GREEN}Claude Code Backup Script v${SCRIPT_VERSION}${NC}"
     echo "=================================="
     echo ""
 
     # Parse config
     parse_config
+
+    if [ "$FAST_COMPARE" = "true" ]; then
+        log_info "Change detection: fast (size + mtime)"
+    fi
 
     # Run all backup functions
     backup_global_settings

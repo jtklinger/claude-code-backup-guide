@@ -4,7 +4,7 @@ An optional **Windows-only** layer that makes the scheduled backup observable: e
 
 ## What it does
 
-- **`backup-wrapper.ps1`** — the Task Scheduler entry point. Runs `..\backup.sh` via Git-bash, captures its output and exit code, writes a daily log file + a Windows Event Log entry, updates a state file, and shows a toast (success *and* failure). It re-emits the bash exit code so `LastTaskResult` stays accurate.
+- **`backup-wrapper.ps1`** — the Task Scheduler entry point. Runs `..\backup.sh` via Git-bash, captures its output and exit code, writes a daily log file + a Windows Event Log entry, updates a state file, and shows a toast (success *and* failure). It re-emits the bash exit code so `LastTaskResult` stays accurate. Accepts `-Fast` (pass `--fast` through to backup.sh) and `-Silent` (hidden window).
 - **`backup-watchdog.ps1`** — read-only. Run at logon + every 4h; toasts + writes a Warning event if no successful backup happened within ~13h (one missed scheduled slot).
 - **`install.ps1`** — idempotent one-time setup (registers the Event Log source, re-points the backup task at the wrapper, creates the watchdog task).
 - **`toast.ps1`** — shared toast helper (built-in Windows toast API; no external module).
@@ -14,16 +14,23 @@ An optional **Windows-only** layer that makes the scheduled backup observable: e
 From an **elevated** PowerShell prompt (Run as administrator — required to register the Event Log source):
 
 ```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\me\projects\claude-code-backup-guide\scripts\windows\install.ps1"
+powershell -NoProfile -ExecutionPolicy Bypass -File "C:\Users\me\projects\claude-code-backup-guide\scripts\windows\install.ps1" -Fast -Silent
 ```
 
 Re-running it is safe; it updates the tasks in place.
+
+**Install switches:**
+
+- **`-Fast`** — bakes `--fast` (size + mtime change detection) into the backup task so the scheduled run skips reading every byte. See the main README for the trade-off.
+- **`-Silent`** — runs the backup *and* watchdog tasks with a hidden window, so nothing pops up on screen during the (multi-minute) run. Toasts still appear — they use a separate API and the tasks still run in your interactive session.
+
+Both are optional. Omit them for the original behavior (visible window, byte-exact `cmp`).
 
 ## Where things live
 
 - **Logs + state:** `C:\Users\me\claude-code-backup-logs\` (a sibling of the backup repo — deliberately **not** under `%LOCALAPPDATA%`, which the packaged Claude desktop app virtualizes to a per-package `LocalCache`, making an AppData path resolve inconsistently between the scheduled task and other contexts)
   - `logs\backup-YYYY-MM-DD.log` — full captured output, one file per day, kept 14 days
-  - `last-run.json` — `{ lastRunIso, exitCode, result, lastSuccessIso, logPath, scriptVersion }` (read by the watchdog)
+  - `last-run.json` — `{ lastRunIso, exitCode, result, lastSuccessIso, logPath, fast, scriptVersion }` (read by the watchdog)
 - **Event Log:** `Application` log, source `ClaudeCodeBackup`
 
 | Event ID | Level | Meaning |
@@ -40,7 +47,7 @@ Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 20 | Format-T
 
 ## Toasts
 
-Toasts use the built-in `Windows.UI.Notifications` API and render because the tasks run in your interactive logged-on session. If toasts don't appear on your machine, install the fallback and they'll work without any other change:
+Toasts use the built-in `Windows.UI.Notifications` API and render because the tasks run in your interactive logged-on session. A **failed** run's toast includes the last error line from the backup output, so you can see the cause at a glance (not just an exit code). If toasts don't appear on your machine, install the fallback and they'll work without any other change:
 
 ```powershell
 Install-Module BurntToast -Scope CurrentUser

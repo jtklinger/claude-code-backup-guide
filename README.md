@@ -1,6 +1,6 @@
 # Claude Code Backup & Restore Guide
 
-**Current release: v2.3.0** (see [changelog](#changelog))
+**Current release: v2.4.0** (see [changelog](#changelog))
 
 A config-driven system for backing up and restoring your complete Claude Code environment — settings, memory, skills, plugins, user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), sessions, subagent transcripts, tool-result payloads, and more.
 
@@ -250,17 +250,19 @@ Usage: bash init.sh [backup-directory]
 #### backup.sh
 
 ```
-Usage: bash backup.sh [backup-directory] [--sanitize <output-directory>]
+Usage: bash backup.sh [backup-directory] [--fast] [--status] [--sanitize <output-directory>]
 ```
 
 - Reads `backup-config.json` from the backup directory
 - Copies all data categories (global settings, MCP config, skills, plugins, user-content dirs, todos, project data including subagent transcripts and tool-result payloads)
-- Only copies files that have changed (uses `cmp` for diffing)
+- Only copies files that have changed — byte-exact (`cmp`) by default, or size + mtime with `--fast`
 - Removes stale files from the backup that no longer exist in the source
 - Stages, commits, and optionally pushes
 - Fully non-interactive — safe for cron or Task Scheduler
 - If no backup-directory argument is provided, assumes the script's parent directory is the backup repo
 - `--sanitize <output-directory>` produces a credential-free export in the given directory (see [Sanitized Export](#sanitized-export-for-sharing))
+- `--fast` detects changes by **size + modified-time** instead of reading every byte — much faster over a large, mostly-unchanged corpus (session transcripts). Opt-in; the default stays byte-exact. Trade-off: a content change that preserves *both* size and mtime isn't detected (safe for Claude's append-only session/todo files). The first `--fast` run re-copies once to stamp preserved mtimes, then subsequent runs are fast.
+- `--status` prints a health readout (last commit, total commits, remote sync, working-tree + `.git` size) for the backup directory and exits without backing up
 
 #### restore.sh
 
@@ -531,7 +533,49 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 **A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version.
 
+## Upgrading an existing deployment
+
+Upgrades within v2.x are **additive and backward-compatible** — no `backup-config.json` changes, and a backup made with an older v2.x restores fine with a newer script (and vice-versa). To upgrade:
+
+**1. Pull the new scripts**
+
+```bash
+cd /path/to/claude-code-backup-guide   # e.g. C:\Users\me\projects\claude-code-backup-guide
+git pull
+```
+
+That's all the portable tool needs — `backup.sh` / `restore.sh` are read fresh on each run, so cron or Task Scheduler jobs that invoke them by path pick up the new version automatically.
+
+**2. (Windows only) Re-run the installer to adopt new task options**
+
+If you use the Windows observability layer and want new switches baked into the scheduled task (e.g. `-Fast` / `-Silent` from v2.4.0), re-run the **elevated** installer:
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "...\scripts\windows\install.ps1" -Fast -Silent
+```
+
+It's idempotent — it updates the existing tasks in place (triggers and principal preserved). Skip this step if your upgrade only changed `backup.sh` behavior, not the task wiring.
+
+**3. Verify**
+
+```bash
+bash scripts/backup.sh /path/to/your-backup --status    # last commit, sync state, sizes
+```
+
+On Windows, also confirm the next scheduled run writes a `1000` event: `Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 1`.
+
+> **First `--fast` run after upgrading:** if your backup repo was last written by byte-exact runs, the first `--fast` run re-stamps every file's mtime once (so it isn't faster *that* run); subsequent runs get the speedup.
+
 ## Changelog
+
+### v2.4.0 (2026-06-28)
+
+- **New: `--fast` change detection on `backup.sh`.** Detects changes by size + mtime (one `stat` per file, no byte read) instead of a full byte-compare. Far less I/O over a large, mostly-unchanged corpus — on the maintainer's session-heavy repo a no-op run is ~2× faster. Opt-in; the default stays byte-exact (`cmp`). Trade-off: a content change that preserves *both* size and mtime is not detected, which is safe for Claude's append-only session/todo files. The first `--fast` run after upgrading re-copies once to stamp preserved mtimes, then settles into fast no-ops.
+- **New: `-Fast` / `-Silent` switches on the Windows layer.** `install.ps1 -Fast` bakes `--fast` into the scheduled backup task; `install.ps1 -Silent` runs the backup + watchdog with a hidden window (no console pop-up during the multi-minute run) while toasts still appear. `backup-wrapper.ps1` and `backup-watchdog.ps1` gained matching `-Fast`/`-Silent` parameters.
+- **New: `backup.sh --status`.** Prints a health readout — last commit, total commits, remote-sync state, and working-tree + `.git` sizes — then exits without backing up. A quick "is my backup healthy?" check.
+- **Improved: failure toasts name the cause.** A failed run's toast now includes the last error line from the backup output (ANSI-stripped), so you see *why* it failed at a glance instead of just an exit code.
+- **New: CI lint guard.** A GitHub Actions workflow (`.github/workflows/lint.yml`) runs `bash -n` on every script on push/PR — the hard gate that would have caught the v2.2.0 truncation — plus ShellCheck and PSScriptAnalyzer as advisory linters.
+- **No config schema changes** — existing `backup-config.json` (version `1`) continues to work without edits.
 
 ### v2.3.0 (2026-06-23)
 
