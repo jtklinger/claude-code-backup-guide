@@ -14,13 +14,14 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 - `templates/.gitignore` — Recommended `.gitignore` for user backup repositories
 - `templates/backup-config.json` — Default config template
 - `docs/plans/` — Design documents
-- `scripts/windows/` — **Optional Windows-only observability layer** (PowerShell): wraps the scheduled backup to log each run to a file + the Windows Event Log and toast on success/failure, plus a watchdog for missed runs. Does not modify the portable `backup.sh`. See `scripts/windows/README.md`.
+- `scripts/windows/` — **Optional Windows-only observability layer** (PowerShell): wraps the scheduled backup to log each run to a file + the Windows Event Log and toast on success/failure, plus a watchdog for missed runs. Does not modify the portable `backup.sh`. Install with `-Fast` (bake in `--fast`) and/or `-Silent` (hidden window, no console pop-up). See `scripts/windows/README.md`.
+- `.github/workflows/lint.yml` — **CI lint guard**: `bash -n` on every script (hard gate) + ShellCheck/PSScriptAnalyzer (advisory) on push/PR. Stops a syntax-broken script (the v2.2.0 failure mode) from reaching `master`.
 
 ## Key Conventions
 
 - All scripts use `set -e` and colored output (`GREEN`/`YELLOW`/`RED`/`NC`)
 - Config is `backup-config.json` in backup repo root — parsed with `jq`
-- Change detection via `cmp -s` to avoid unnecessary git commits
+- Change detection via `cmp -s` (byte-exact) by default to avoid unnecessary git commits; `backup.sh --fast` switches to size + mtime (one `stat` per file, skips reading every byte) — opt-in, default stays byte-exact
 - Skills sync prefers `rsync --delete` with fallback to manual `find`/`cp`
 - Session .jsonl files are stored in `projects/<name>/sessions/` in the backup but restored to `projects/<name>/` (the project root) where Claude Code reads them
 - Cross-platform: Windows Git Bash, macOS, Linux — paths use `$HOME/.claude`
@@ -35,7 +36,7 @@ User-content directories are driven by a shared `USER_CONTENT_DIRS` array in `ba
 
 ## Testing Changes
 
-No test suite. To validate:
+No unit test suite (CI runs `bash -n` + linters via `.github/workflows/lint.yml`). To validate behavior locally:
 
 ```bash
 # First-time setup (creates config + .gitignore)
