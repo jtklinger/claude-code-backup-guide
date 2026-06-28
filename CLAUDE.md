@@ -14,6 +14,7 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 - `templates/.gitignore` — Recommended `.gitignore` for user backup repositories
 - `templates/backup-config.json` — Default config template
 - `docs/plans/` — Design documents
+- `scripts/windows/` — **Optional Windows-only observability layer** (PowerShell): wraps the scheduled backup to log each run to a file + the Windows Event Log and toast on success/failure, plus a watchdog for missed runs. Does not modify the portable `backup.sh`. See `scripts/windows/README.md`.
 
 ## Key Conventions
 
