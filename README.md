@@ -1,6 +1,6 @@
 # Claude Code Backup & Restore Guide
 
-**Current release: v2.2.1** (see [changelog](#changelog))
+**Current release: v2.3.0** (see [changelog](#changelog))
 
 A config-driven system for backing up and restoring your complete Claude Code environment — settings, memory, skills, plugins, user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), sessions, subagent transcripts, tool-result payloads, and more.
 
@@ -532,6 +532,12 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 **A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version.
 
 ## Changelog
+
+### v2.3.0 (2026-06-23)
+
+- **New: Windows logging & alerts.** Adds an optional Windows-only observability layer under `scripts/windows/` (`backup-wrapper.ps1`, `backup-watchdog.ps1`, `install.ps1`, `toast.ps1`). The scheduled backup now logs every run to a daily log file **and** the Windows Event Log (source `ClaudeCodeBackup`; IDs 1000 success / 1001 failure / 2000 watchdog), shows a toast on success and failure, and a watchdog warns if no successful backup happens within ~13h. Directly addresses the silent-failure class of bug behind v2.2.0. Setup + details: `scripts/windows/README.md`.
+- **Portable `backup.sh` is unchanged** — the Windows layer wraps it; macOS/Linux are unaffected.
+- **No config schema changes** — existing `backup-config.json` (version `1`) continues to work without edits.
 
 ### v2.2.1 (2026-06-23)
 
