@@ -30,7 +30,7 @@ at 07:00 and 19:00 daily. The bash `log_info/log_warn/log_error` helpers only `e
 ```
 Task Scheduler ──► backup-wrapper.ps1 ──► (Git bash) backup.sh ──► backup repo
                         │
-                        ├─► log file  (%LOCALAPPDATA%\ClaudeCodeBackup\logs\)
+                        ├─► log file  (C:\Users\me\claude-code-backup-logs\logs\)
                         ├─► Windows Event Log  (Application / source "ClaudeCodeBackup")
                         ├─► last-run.json  (state for the watchdog)
                         └─► toast  (success + failure)
@@ -47,7 +47,7 @@ The wrapper owns all capture / logging / alerting. `backup.sh` stays untouched a
 - `toast.ps1` — shared toast helper (dot-sourced by the other two)
 - `README.md` — setup, what is logged, where, and manual removal
 
-**State + logs directory:** `%LOCALAPPDATA%\ClaudeCodeBackup\`
+**State + logs directory:** `C:\Users\me\claude-code-backup-logs\` (sibling of the backup repo; **not** `%LOCALAPPDATA%` — see the MSIX-virtualization note below)
 - `logs\backup-YYYY-MM-DD.log` — full captured output, one file per day
 - `last-run.json` — run state
 
@@ -55,7 +55,9 @@ The wrapper owns all capture / logging / alerting. `backup.sh` stays untouched a
 
 The new Task Scheduler entry point (replaces the direct `bash` action).
 
-**Parameters:** `-BackupDir` (default `C:\Users\me\claude-code-backup`), `-BashExe` (default: auto-detect `C:\Program Files\Git\bin\bash.exe`), `-LogDir` (default `%LOCALAPPDATA%\ClaudeCodeBackup\logs`), `-RetentionDays` (default 14).
+**Parameters:** `-BackupDir` (default `C:\Users\me\claude-code-backup`), `-BashExe` (default: auto-detect `C:\Program Files\Git\bin\bash.exe`), `-StateDir` (default: `<parent of BackupDir>\claude-code-backup-logs`, e.g. `C:\Users\me\claude-code-backup-logs`), `-RetentionDays` (default 14).
+
+> **Execution note (MSIX path fix):** the original design put state + logs under `%LOCALAPPDATA%`. On this machine the Claude desktop app is a packaged MSIX app that virtualizes `%LOCALAPPDATA%` to a per-package `LocalCache`, so the path resolved inconsistently between the scheduled task and other contexts (the task's success state wasn't where the watchdog read). Both scripts now derive a stable, non-AppData path next to the backup repo. The committed scripts are authoritative.
 
 **Steps:**
 1. Resolve paths; create `LogDir` if missing. If `BashExe` not found → write Error event 1001 + toast + `exit 9` (do not silently succeed).
