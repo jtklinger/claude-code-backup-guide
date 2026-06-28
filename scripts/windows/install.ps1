@@ -29,8 +29,13 @@ $wdAction  = New-ScheduledTaskAction -Execute $ps `
     -Argument "-NoProfile -ExecutionPolicy Bypass -File `"$watchdog`""
 $tLogon    = New-ScheduledTaskTrigger -AtLogOn -User $user
 $tRepeat   = New-ScheduledTaskTrigger -Once -At (Get-Date)
-$tRepeat.Repetition.Interval = "PT4H"
-$tRepeat.Repetition.Duration = ""            # empty = repeat indefinitely
+# A fresh -Once trigger has a null .Repetition, so build the pattern via its CIM class
+# (every 4h; no Duration set = repeat indefinitely).
+$repClass  = Get-CimClass -Namespace ROOT/Microsoft/Windows/TaskScheduler -ClassName MSFT_TaskRepetitionPattern
+$rep       = New-CimInstance -CimClass $repClass -ClientOnly
+$rep.Interval = "PT4H"
+$rep.StopAtDurationEnd = $false
+$tRepeat.Repetition = $rep
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
 $settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable
 Register-ScheduledTask -TaskName $WatchdogTaskName -Action $wdAction `
