@@ -23,6 +23,15 @@ set -e
 
 SCRIPT_VERSION="2.5.0"
 
+# Associative arrays (per-category counters + the project-dedup `seen` map) require
+# bash 4+. Stock macOS ships bash 3.2, where `declare -A` fails at runtime. Check up
+# front and give a clear, actionable message instead of a cryptic error mid-run.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: this script requires bash 4.0+ (found ${BASH_VERSION:-non-bash shell})." >&2
+    echo "On macOS: 'brew install bash', then run with the newer bash (e.g. /opt/homebrew/bin/bash)." >&2
+    exit 1
+fi
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -31,7 +40,6 @@ BLUE='\033[0;34m'
 NC='\033[0m'
 
 # Global state
-CHANGES_MADE=false
 FAST_COMPARE=false   # --fast: size+mtime change detection instead of byte-exact cmp
 STATUS_MODE=false    # --status: print a health readout and exit
 COUNTS_GLOBAL=0
@@ -116,16 +124,24 @@ parse_config() {
     while IFS= read -r proj; do
         proj="${proj%$'\r'}"  # Strip Windows carriage return
         [ -n "$proj" ] && project_patterns+=("$proj")
-    done < <(jq -r '.projects[]? // empty' "$config_file")
+    done < <(jq -r '(.projects // ["*"])[]?' "$config_file")
 
     PROJECTS=()
     if [ ${#project_patterns[@]} -gt 0 ] && [ -d "$CLAUDE_DIR/projects" ]; then
         local -A seen=()
-        local pattern matched dir name
+        local pattern matched dir name saved_ifs
+        local -a matches
         for pattern in "${project_patterns[@]}"; do
             matched=false
+            # Expand the glob with word-splitting disabled so a pattern that
+            # contains a space is treated as one literal token, never split into
+            # args that would glob against the current working directory.
             shopt -s nullglob
-            for dir in "$CLAUDE_DIR/projects/"$pattern; do
+            saved_ifs=$IFS; IFS=
+            matches=( "$CLAUDE_DIR/projects/"$pattern )
+            IFS=$saved_ifs
+            shopt -u nullglob
+            for dir in "${matches[@]}"; do
                 [ -d "$dir" ] || continue
                 name=$(basename "$dir")
                 if [ -z "${seen[$name]:-}" ]; then
@@ -134,7 +150,6 @@ parse_config() {
                 fi
                 matched=true
             done
-            shopt -u nullglob
             # Literal (non-glob) entries that don't exist yet are kept as-is
             # so backup_projects() can still warn "not found" instead of the
             # entry silently vanishing.
@@ -196,7 +211,6 @@ copy_if_changed() {
     fi
 
     copy_file "$source" "$dest"
-    CHANGES_MADE=true
     return 0
 }
 
@@ -216,12 +230,11 @@ sync_directory() {
     local found_files=false
     while IFS= read -r -d '' src_file; do
         found_files=true
-        local rel_path="${src_file#$source_dir/}"
+        local rel_path="${src_file#"$source_dir"/}"
         local dest_file="$dest_dir/$rel_path"
         mkdir -p "$(dirname "$dest_file")"
         if ! is_unchanged "$src_file" "$dest_file"; then
             copy_file "$src_file" "$dest_file"
-            CHANGES_MADE=true
             ((copied++)) || true
         fi
     done < <(find "$source_dir" -type f -name "$file_glob" -print0 2>/dev/null)
@@ -229,11 +242,10 @@ sync_directory() {
     # Remove stale files from dest that no longer exist in source
     if [ -d "$dest_dir" ]; then
         while IFS= read -r -d '' dest_file; do
-            local rel_path="${dest_file#$dest_dir/}"
+            local rel_path="${dest_file#"$dest_dir"/}"
             local src_file="$source_dir/$rel_path"
             if [ ! -f "$src_file" ]; then
                 rm -f "$dest_file"
-                CHANGES_MADE=true
             fi
         done < <(find "$dest_dir" -type f -name "$file_glob" -print0 2>/dev/null)
     fi
@@ -262,7 +274,7 @@ backup_global_settings() {
     # Back up custom root scripts (MCP helpers, unlock scripts, migration tools, etc.)
     # Captures *.cmd, *.ps1, *.js, *.sh, *.py — anything a user might drop in ~/.claude/
     for ext in cmd ps1 js sh py; do
-        if ls "$CLAUDE_DIR"/*."$ext" &>/dev/null 2>&1; then
+        if ls "$CLAUDE_DIR"/*."$ext" &>/dev/null; then
             for script_file in "$CLAUDE_DIR"/*."$ext"; do
                 local basename
                 basename=$(basename "$script_file")
@@ -292,7 +304,6 @@ backup_global_settings() {
         esac
         if [ ! -f "$CLAUDE_DIR/$bname" ]; then
             rm -f "$dest_file"
-            CHANGES_MADE=true
         fi
     done
 
@@ -330,23 +341,17 @@ backup_skills() {
 
     # Prefer rsync if available (excludes .git, handles deletes)
     if command -v rsync &>/dev/null; then
-        local rsync_out
-        rsync_out=$(rsync -ai --delete --exclude='.git' "$source_dir/" "$dest_dir/" 2>&1) || true
-        # rsync -i prints itemized changes; if output is non-empty, something changed
-        if [ -n "$rsync_out" ]; then
-            CHANGES_MADE=true
-        fi
+        rsync -a --delete --exclude='.git' "$source_dir/" "$dest_dir/" >/dev/null 2>&1 || true
     else
         # Manual sync fallback — copy all files excluding .git
         mkdir -p "$dest_dir"
         local copied=0
         while IFS= read -r -d '' src_file; do
-            local rel_path="${src_file#$source_dir/}"
+            local rel_path="${src_file#"$source_dir"/}"
             local dest_file="$dest_dir/$rel_path"
             mkdir -p "$(dirname "$dest_file")"
             if ! is_unchanged "$src_file" "$dest_file"; then
                 copy_file "$src_file" "$dest_file"
-                CHANGES_MADE=true
                 ((copied++)) || true
             fi
         done < <(find "$source_dir" -type f -not -path '*/.git/*' -print0 2>/dev/null)
@@ -354,10 +359,9 @@ backup_skills() {
         # Remove stale files
         if [ -d "$dest_dir" ]; then
             while IFS= read -r -d '' dest_file; do
-                local rel_path="${dest_file#$dest_dir/}"
+                local rel_path="${dest_file#"$dest_dir"/}"
                 if [ ! -f "$source_dir/$rel_path" ]; then
                     rm -f "$dest_file"
-                    CHANGES_MADE=true
                 fi
             done < <(find "$dest_dir" -type f -not -path '*/.git/*' -print0 2>/dev/null)
         fi
@@ -415,30 +419,24 @@ backup_plugin_data() {
     fi
 
     if command -v rsync &>/dev/null; then
-        local rsync_out
-        rsync_out=$(rsync -ai --delete "$source_dir/" "$dest_dir/" 2>&1) || true
-        if [ -n "$rsync_out" ]; then
-            CHANGES_MADE=true
-        fi
+        rsync -a --delete "$source_dir/" "$dest_dir/" >/dev/null 2>&1 || true
     else
         mkdir -p "$dest_dir"
         while IFS= read -r -d '' src_file; do
-            local rel_path="${src_file#$source_dir/}"
+            local rel_path="${src_file#"$source_dir"/}"
             local dest_file="$dest_dir/$rel_path"
             mkdir -p "$(dirname "$dest_file")"
             if ! is_unchanged "$src_file" "$dest_file"; then
                 copy_file "$src_file" "$dest_file"
-                CHANGES_MADE=true
             fi
         done < <(find "$source_dir" -type f -print0 2>/dev/null)
 
         # Remove stale files
         if [ -d "$dest_dir" ]; then
             while IFS= read -r -d '' dest_file; do
-                local rel_path="${dest_file#$dest_dir/}"
+                local rel_path="${dest_file#"$dest_dir"/}"
                 if [ ! -f "$source_dir/$rel_path" ]; then
                     rm -f "$dest_file"
-                    CHANGES_MADE=true
                 fi
             done < <(find "$dest_dir" -type f -print0 2>/dev/null)
         fi
@@ -515,8 +513,7 @@ backup_projects() {
 
         # Copy memory files
         if [ -d "$source_dir/memory" ]; then
-            local mem_count
-            mem_count=$(sync_directory "$source_dir/memory" "$dest_base/memory")
+            sync_directory "$source_dir/memory" "$dest_base/memory" >/dev/null
             local mem_files
             mem_files=$(find "$dest_base/memory" -type f 2>/dev/null | wc -l)
             ((total_count += mem_files)) || true
@@ -556,7 +553,6 @@ backup_projects() {
                     basename=$(basename "$dest_file")
                     if [ ! -f "$source_dir/$basename" ]; then
                         rm -f "$dest_file"
-                        CHANGES_MADE=true
                     fi
                 done < <(find "$sessions_dest" -type f \( -name "*.jsonl" -o -name "*.meta.json" \) -print0 2>/dev/null)
             fi
@@ -600,7 +596,6 @@ backup_projects() {
                     uuid=$(basename "$uuid_dir")
                     if [ ! -d "$source_dir/$uuid/$category" ]; then
                         rm -rf "$uuid_dir"
-                        CHANGES_MADE=true
                     fi
                 done
             fi
@@ -646,8 +641,10 @@ sanitize_claude_json() {
                         elif startswith("--host=") then "--host=<HOSTNAME>"
                         elif startswith("--user=") then "--user=<USERNAME>"
                         elif startswith("--key=") then "--key=<SSH_KEY_PATH>"
+                        elif startswith("--header=") then
+                            (if (ltrimstr("--header=") | test("(authorization|bearer)"; "i")) then "--header=<AUTH_TOKEN>" else . end)
                         elif startswith("--header") then .
-                        elif test("^(authorization:|Bearer )") then "<AUTH_TOKEN>"
+                        elif test("^(authorization:|bearer )"; "i") then "<AUTH_TOKEN>"
                         elif test("^https?://") then "<URL>"
                         elif test("\\\\.(com|local|net|org|io)([:/]|$)") then "<HOSTNAME>"
                         elif test("^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+") then "<HOSTNAME>"
@@ -683,7 +680,7 @@ sanitize_settings() {
     local jq_tmp
     jq_tmp=$(mktemp)
     cat > "$jq_tmp" << 'JQFILTER'
-if .permissions.allow then
+(if .permissions.allow then
     .permissions.allow = (
         [.permissions.allow[] |
             if startswith("mcp__") then
@@ -698,13 +695,15 @@ if .permissions.allow then
         ] | unique
     )
 else .
-end
+end)
+# Redact the top-level env map (values can hold tokens/paths); keys are kept.
+| (if .env then .env = (.env | map_values("<REDACTED>")) else . end)
 JQFILTER
 
     for f in settings.json settings.local.json; do
         if [ -f "$src_dir/$f" ]; then
             jq -f "$jq_tmp" "$src_dir/$f" > "$dest_dir/$f"
-            log_info "  Sanitized $f (redacted MCP permission names)"
+            log_info "  Sanitized $f (redacted MCP permission names + env values)"
         fi
     done
     rm -f "$jq_tmp"
@@ -742,6 +741,12 @@ copy_safe_files() {
         if [ -d "$src_dir/$category" ]; then
             mkdir -p "$dest_dir/$category"
             cp -r "$src_dir/$category/." "$dest_dir/$category/"
+            # plugins/data/ is arbitrary plugin state (added in v2.2.0) and was
+            # never vetted as credential-free — drop it from the shareable export.
+            if [ "$category" = "plugins" ] && [ -d "$dest_dir/plugins/data" ]; then
+                rm -rf "$dest_dir/plugins/data"
+                log_info "  Excluded plugins/data/ from export (unvetted plugin state)"
+            fi
             local count
             count=$(find "$dest_dir/$category" -type f 2>/dev/null | wc -l)
             log_info "  Copied $category/ ($count files)"
@@ -765,6 +770,14 @@ prompt_project_memory() {
 
     if [ ${#project_dirs[@]} -eq 0 ]; then
         log_info "  No project memory data found"
+        return 0
+    fi
+
+    # Project-memory selection is interactive. In a non-interactive shell (cron,
+    # piped stdin) a bare `read` hits EOF and would exit under `set -e`. Skip the
+    # prompts and export no memory — the conservative default for a shareable export.
+    if [ ! -t 0 ]; then
+        log_warn "  Non-interactive shell — skipping project memory prompts (no memory exported)"
         return 0
     fi
 
@@ -813,7 +826,7 @@ This is a sanitized export of Claude Code settings, safe for sharing.
 | Keybindings | `global/keybindings.json` | Custom key bindings |
 | MCP config | `global/claude.json` | Server definitions (credentials redacted) |
 | Skills | `skills/` | Installed skill packages |
-| Plugins | `plugins/` | Plugin registry |
+| Plugins | `plugins/` | Plugin registry (arbitrary `plugins/data/` state excluded from export) |
 | Plans | `plans/` | Saved implementation plans |
 | Commands | `commands/` | Custom slash commands |
 | Subagents | `agents/` | Custom subagent definitions (if any) |
@@ -827,6 +840,7 @@ This is a sanitized export of Claude Code settings, safe for sharing.
 
 - **MCP server credentials:** Hostnames, usernames, SSH key paths, auth tokens, and URLs replaced with placeholders (`<HOSTNAME>`, `<USERNAME>`, `<SSH_KEY_PATH>`, `<AUTH_TOKEN>`, `<URL>`, `<PATH>`)
 - **MCP environment variables:** All values replaced with `<REDACTED>`
+- **settings.json env values:** Top-level `env` map values replaced with `<REDACTED>` (keys kept)
 - **MCP permission names:** Server-specific names replaced with `<server>` pattern
 - **Account data:** OAuth tokens, user IDs, email addresses removed entirely
 - **App state:** Runtime counters, caches, and analytics data removed
@@ -838,6 +852,9 @@ User-content directories are **copied as-is** and may contain personal context:
 - `plans/`, `scheduled-tasks/`, `agents/`, `hooks/`, `rules/` — may reference your
   infrastructure, names, or internal systems. Review each file before publishing.
 - `commands/`, `output-styles/` — typically generic, but worth a scan.
+- `global/settings.json` `permissions.allow` — **only MCP (`mcp__…`) entries are
+  redacted.** Non-MCP rules such as `Bash(ssh <hostname>:*)` are kept verbatim and can
+  reveal hostnames, usernames, or internal commands. Review these before sharing.
 
 ## Setup instructions
 
@@ -855,8 +872,14 @@ sanitize_and_export() {
     echo "================"
     echo ""
 
-    # Create/clean output directory
+    # Create the output directory. If it already holds a prior export, clear the
+    # export-managed paths first so stale files from a previous run don't linger.
+    # Only paths this script writes are removed — never arbitrary user files.
     mkdir -p "$SANITIZE_DIR"
+    local _cat
+    for _cat in global skills plugins projects README.md "${USER_CONTENT_DIRS[@]%%:*}"; do
+        rm -rf "${SANITIZE_DIR:?}/${_cat}"
+    done
 
     log_info "Exporting sanitized settings to: $SANITIZE_DIR"
     echo ""
@@ -914,7 +937,10 @@ show_status() {
     else
         log_warn "  Not a git repository"
     fi
-    echo "  Working tree:  $(du -sh --exclude=.git . 2>/dev/null | cut -f1)"
+    local tree_size
+    tree_size=$(du -sh --exclude=.git . 2>/dev/null | cut -f1)   # GNU du (Linux, Git Bash)
+    [ -n "$tree_size" ] || tree_size=$(du -sh . 2>/dev/null | cut -f1)  # BSD/macOS du: no --exclude
+    echo "  Working tree:  ${tree_size:-?}"
     echo "  Git history:   $(du -sh .git 2>/dev/null | cut -f1)"
 }
 
@@ -1012,6 +1038,8 @@ main() {
         return 0
     fi
 
+    local push_failed=false
+
     # Stage specific backup directories (only dirs that might exist)
     local stage_dirs=(global skills plugins todos projects)
     for entry in "${USER_CONTENT_DIRS[@]}"; do
@@ -1019,7 +1047,21 @@ main() {
     done
     for dir in "${stage_dirs[@]}"; do
         if [ -d "$BACKUP_DIR/$dir" ]; then
-            git add "$BACKUP_DIR/$dir" 2>/dev/null || true
+            if ! git add "$BACKUP_DIR/$dir"; then
+                log_error "git add failed for '$dir' -- a stale .git/index.lock (crash/power loss) or repo corruption can cause this; aborting so it is not masked as 'No changes detected'"
+                exit 1
+            fi
+        fi
+    done
+
+    # Stage the repo metadata too, so a fresh clone is a valid, restorable backup
+    # (restore.sh hard-fails without backup-config.json). Same fail-loud policy as above.
+    for meta_file in backup-config.json .gitignore; do
+        if [ -f "$BACKUP_DIR/$meta_file" ]; then
+            if ! git add "$BACKUP_DIR/$meta_file"; then
+                log_error "git add failed for '$meta_file' -- a stale .git/index.lock or repo corruption can cause this; aborting"
+                exit 1
+            fi
         fi
     done
 
@@ -1039,7 +1081,8 @@ main() {
             elif git push "$GIT_REMOTE" master 2>/dev/null; then
                 log_warn "Pushed to master (configured branch '$GIT_BRANCH' failed)"
             else
-                log_error "Push failed -- please push manually"
+                log_error "Push failed -- the local commit succeeded but the off-machine copy is now out of sync; please push manually"
+                push_failed=true
             fi
         fi
     fi
@@ -1055,6 +1098,14 @@ main() {
     local last_hash
     last_hash=$(git rev-parse --short HEAD 2>/dev/null || echo "N/A")
     log_info "Backup complete. Last commit: $last_hash"
+
+    # A failed auto-push means the disaster-recovery copy is stale. Exit non-zero
+    # so the Windows observability layer (LastTaskResult / watchdog) reflects
+    # reality instead of toasting success while the remote silently ages out.
+    if [ "$push_failed" = true ]; then
+        log_error "Exiting non-zero: git_auto_push is enabled but the push failed."
+        exit 1
+    fi
 }
 
 main "$@"
