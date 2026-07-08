@@ -23,6 +23,12 @@ if (-not [System.Diagnostics.EventLog]::SourceExists('ClaudeCodeBackup')) {
 # 2. Repoint the existing backup task at the wrapper (preserves triggers + principal).
 #    -WindowStyle Hidden (PowerShell) + the wrapper's own Hide-ConsoleWindow give a
 #    no-pop-up run; -Fast enables size+mtime change detection in backup.sh.
+if (-not (Get-ScheduledTask -TaskName $BackupTaskName -ErrorAction SilentlyContinue)) {
+    Write-Host "ERROR: Scheduled task '$BackupTaskName' not found." -ForegroundColor Red
+    Write-Host "This installer repoints an existing backup task at the wrapper; it does not create one."
+    Write-Host "Create the '$BackupTaskName' task first (see scripts/windows/README.md), then re-run this script."
+    exit 1
+}
 $backupPsArgs = "-NoProfile -ExecutionPolicy Bypass"
 if ($Silent) { $backupPsArgs += " -WindowStyle Hidden" }
 $backupPsArgs += " -File `"$wrapper`" -BackupDir `"$BackupDir`""

@@ -103,7 +103,7 @@ try {
         lastSuccessIso = $lastSuccess
         logPath        = $logFile
         fast           = [bool]$Fast
-        scriptVersion  = '2.4.0'
+        scriptVersion  = '2.5.0'
     } | ConvertTo-Json | Set-Content -Path $stateFile -Encoding utf8
 
     # --- Event Log + toast (success and failure) ---

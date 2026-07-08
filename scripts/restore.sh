@@ -23,6 +23,15 @@ set -e
 
 SCRIPT_VERSION="2.5.0"
 
+# This backup toolkit requires bash 4+ (backup.sh uses associative arrays). Enforce
+# the same requirement here so a fresh-machine restore fails early with a clear
+# message on stock macOS bash 3.2 rather than partway through.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: this script requires bash 4.0+ (found ${BASH_VERSION:-non-bash shell})." >&2
+    echo "On macOS: 'brew install bash', then run with the newer bash (e.g. /opt/homebrew/bin/bash)." >&2
+    exit 1
+fi
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -112,7 +121,11 @@ parse_config() {
     # Expand ~ to $HOME in claude_dir
     CLAUDE_DIR="${CLAUDE_DIR/#\~/$HOME}"
 
-    log_info "Config loaded: claude_dir=$CLAUDE_DIR, ${#PROJECTS[@]} project(s)"
+    # Note: PROJECTS holds the raw config patterns (e.g. ["*"]) and is not used to
+    # drive restore — restore_projects() scans the backup dir directly. Don't print
+    # a pattern count here; it would misrepresent how many projects are in the backup
+    # (the accurate count is shown at the Projects prompt and by restore_projects()).
+    log_info "Config loaded: claude_dir=$CLAUDE_DIR"
 }
 
 backup_existing() {
@@ -241,6 +254,20 @@ restore_global_settings() {
         done
     fi
 
+    # Custom root scripts (*.cmd, *.ps1, *.js, *.sh, *.py) — mirror backup_global_settings
+    for ext in cmd ps1 js sh py; do
+        if ls "$source_dir"/*."$ext" &>/dev/null; then
+            for script_file in "$source_dir"/*."$ext"; do
+                local sbasename
+                sbasename=$(basename "$script_file")
+                if restore_file "$script_file" "$CLAUDE_DIR/$sbasename"; then
+                    log_detail "  Restored $sbasename"
+                    ((count++)) || true
+                fi
+            done
+        fi
+    done
+
     log_info "  Global settings: $count file(s) restored"
 }
 
@@ -277,7 +304,7 @@ restore_skills() {
     fi
 
     while IFS= read -r -d '' src_file; do
-        local rel_path="${src_file#$source_dir/}"
+        local rel_path="${src_file#"$source_dir"/}"
         local dest_file="$dest_dir/$rel_path"
         report_or_copy "$src_file" "$dest_file"
         ((count++)) || true
@@ -298,7 +325,9 @@ restore_plugins() {
     fi
 
     local count=0
-    mkdir -p "$dest_dir"
+    if [ "$DRY_RUN" != "true" ]; then
+        mkdir -p "$dest_dir"
+    fi
 
     for f in installed_plugins.json blocklist.json known_marketplaces.json; do
         if restore_file "$source_dir/$f" "$dest_dir/$f"; then
@@ -306,6 +335,23 @@ restore_plugins() {
             ((count++)) || true
         fi
     done
+
+    # Plugin data (arbitrary plugin state under plugins/data/) — walk recursively,
+    # mirroring backup_plugin_data's nested structure.
+    local data_src="$source_dir/data"
+    if [ -d "$data_src" ]; then
+        local data_dest="$dest_dir/data"
+        while IFS= read -r -d '' src_file; do
+            local rel_path="${src_file#"$data_src"/}"
+            local dest_file="$data_dest/$rel_path"
+            if [ "$DRY_RUN" != "true" ]; then
+                mkdir -p "$(dirname "$dest_file")"
+            fi
+            if restore_file "$src_file" "$dest_file"; then
+                ((count++)) || true
+            fi
+        done < <(find "$data_src" -type f -not -path '*/.git/*' -print0 2>/dev/null)
+    fi
 
     log_info "  Plugins: $count file(s) restored"
     if [ "$count" -gt 0 ]; then
@@ -327,14 +373,18 @@ restore_user_content() {
     fi
 
     local count=0
-    mkdir -p "$dest_dir"
+    if [ "$DRY_RUN" != "true" ]; then
+        mkdir -p "$dest_dir"
+    fi
 
     # Walk the backup dir recursively so nested structure (e.g. scheduled-tasks/<task>/SKILL.md)
     # is preserved on restore.
     while IFS= read -r -d '' src_file; do
-        local rel_path="${src_file#$source_dir/}"
+        local rel_path="${src_file#"$source_dir"/}"
         local dest_file="$dest_dir/$rel_path"
-        mkdir -p "$(dirname "$dest_file")"
+        if [ "$DRY_RUN" != "true" ]; then
+            mkdir -p "$(dirname "$dest_file")"
+        fi
         if restore_file "$src_file" "$dest_file"; then
             ((count++)) || true
         fi
@@ -354,7 +404,9 @@ restore_todos() {
     fi
 
     local count=0
-    mkdir -p "$dest_dir"
+    if [ "$DRY_RUN" != "true" ]; then
+        mkdir -p "$dest_dir"
+    fi
 
     for json_file in "$source_dir"/*.json; do
         [ -f "$json_file" ] || continue
@@ -404,7 +456,7 @@ restore_projects() {
         # Restore memory files
         if [ -d "$src_base/memory" ]; then
             while IFS= read -r -d '' src_file; do
-                local rel_path="${src_file#$src_base/memory/}"
+                local rel_path="${src_file#"$src_base"/memory/}"
                 local dest_file="$dest_base/memory/$rel_path"
                 report_or_copy "$src_file" "$dest_file"
                 ((proj_count++)) || true
@@ -585,7 +637,15 @@ main() {
     fi
     echo ""
 
-    if prompt_restore "Projects (${#PROJECTS[@]} configured)"; then
+    # Count the actual project directories present in the backup (one config
+    # pattern like "*" can expand to dozens), not the raw pattern count.
+    local backup_project_count=0
+    if [ -d "$BACKUP_DIR/projects" ]; then
+        for d in "$BACKUP_DIR/projects"/*/; do
+            [ -d "$d" ] && ((backup_project_count++)) || true
+        done
+    fi
+    if prompt_restore "Projects ($backup_project_count in backup)"; then
         restore_projects
     else
         log_info "Skipped projects"
