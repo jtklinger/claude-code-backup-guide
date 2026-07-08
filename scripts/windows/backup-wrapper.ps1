@@ -5,7 +5,7 @@
 #   -Silent  hides the console window so the run doesn't pop up on screen; toasts still show.
 [CmdletBinding()]
 param(
-    [string]$BackupDir     = "C:\Users\me\claude-code-backup",
+    [string]$BackupDir     = "$env:USERPROFILE\claude-code-backup",
     [string]$BashExe       = $null,
     [string]$StateDir      = $null,
     [int]   $RetentionDays = 14,

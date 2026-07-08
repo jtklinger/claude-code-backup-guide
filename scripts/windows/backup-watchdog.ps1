@@ -2,7 +2,7 @@
 # Warns (toast + Warning event) if no SUCCESSFUL backup within -MaxAgeHours, or if the
 # last run failed, or if no success has ever been recorded. Never runs the backup itself.
 [CmdletBinding()]
-param([int]$MaxAgeHours = 13, [string]$BackupDir = "C:\Users\me\claude-code-backup", [switch]$Silent)
+param([int]$MaxAgeHours = 13, [string]$BackupDir = "$env:USERPROFILE\claude-code-backup", [switch]$Silent)
 
 $EventSource = 'ClaudeCodeBackup'
 . (Join-Path $PSScriptRoot 'toast.ps1')

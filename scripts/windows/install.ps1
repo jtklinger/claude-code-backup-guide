@@ -2,7 +2,7 @@
 #Requires -RunAsAdministrator
 [CmdletBinding()]
 param(
-    [string]$BackupDir        = "C:\Users\me\claude-code-backup",
+    [string]$BackupDir        = "$env:USERPROFILE\claude-code-backup",
     [string]$BackupTaskName   = "Claude Code Backup",
     [string]$WatchdogTaskName = "Claude Code Backup Watchdog",
     [switch]$Fast,    # bake --fast (size+mtime change detection) into the backup task
