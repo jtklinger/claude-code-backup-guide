@@ -485,8 +485,7 @@ backup_todos() {
         return 0
     fi
 
-    local count
-    count=$(sync_directory "$source_dir" "$dest_dir" "*.json")
+    sync_directory "$source_dir" "$dest_dir" "*.json" >/dev/null
     COUNTS_TODOS=$(find "$dest_dir" -type f -name "*.json" 2>/dev/null | wc -l)
     log_info "  Todos: $COUNTS_TODOS file(s)"
 }

@@ -544,6 +544,10 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ## Changelog
 
+### Unreleased
+
+- **Cleanup:** removed a dead unused-count capture in `backup_todos()` (mirrors the `mem_count` cleanup done in v2.5.0; no behavior change).
+
 ### v2.5.0 (2026-07-07)
 
 - **Changed: `projects` is now pattern-based, with dynamic discovery.** Previously `backup-config.json`'s `projects` array was a fixed allowlist of exact directory names under `~/.claude/projects/` — anything not literally listed was silently skipped. This missed every git worktree session (Claude Code creates a new, randomly-named project slug per worktree, e.g. `C--Users-me-projects-myproject--claude-worktrees-<name>-<hash>`), since a static list can never keep up with names generated after the config was written. `projects` entries are now matched as bash glob patterns against `~/.claude/projects/` at backup time: `["*"]` (the new recommended default) discovers everything, including future projects and worktrees; a prefix glob like `"C--Users-me-projects-myproject*"` scopes to one project plus all its worktrees; exact slugs still work unchanged for users who deliberately scope down; `[]` still means "back up no project/session data" (unchanged opt-out).
