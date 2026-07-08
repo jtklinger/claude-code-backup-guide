@@ -1,6 +1,6 @@
 # Claude Code Backup & Restore Guide
 
-**Current release: v2.4.0** (see [changelog](#changelog))
+**Current release: v2.5.0** (see [changelog](#changelog))
 
 A config-driven system for backing up and restoring your complete Claude Code environment — settings, memory, skills, plugins, user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), sessions, subagent transcripts, tool-result payloads, and more.
 
@@ -156,10 +156,7 @@ The config file lives in the root of your backup repository. It controls what ge
   "claude_dir": "~/.claude",
   "include_sessions": true,
   "include_todos": true,
-  "projects": [
-    "C--Users-me-projects-myproject",
-    "C--Users-me-projects-my-app"
-  ],
+  "projects": ["*"],
   "git_auto_push": false,
   "git_remote": "origin",
   "git_branch": "main"
@@ -172,12 +169,21 @@ The config file lives in the root of your backup repository. It controls what ge
 | `claude_dir` | string | Path to Claude Code data directory (`~` is expanded) |
 | `include_sessions` | boolean | Whether to back up `.jsonl` session transcripts per project |
 | `include_todos` | boolean | Whether to back up per-session todo state |
-| `projects` | string[] | List of project directory names from `~/.claude/projects/` |
+| `projects` | string[] | Patterns matched against directory names in `~/.claude/projects/` (see below) |
 | `git_auto_push` | boolean | Push to remote after each backup commit |
 | `git_remote` | string | Git remote name for auto-push |
 | `git_branch` | string | Git branch name for auto-push |
 
 **Project directory names** use Claude Code's encoding scheme where path separators become dashes (e.g., `C--Users-me-projects-myproject` represents `C:/Users/me/projects/myproject`). The `init.sh` script handles this mapping for you.
+
+**The `projects` field is pattern-based, not a fixed list:**
+
+- `["*"]` (the default, recommended) — discover every directory under `~/.claude/projects/` at backup time. This automatically picks up new projects **and** git worktree sessions (Claude Code creates a new project slug like `C--Users-me-projects-myproject--claude-worktrees-<name>-<hash>` for every worktree you open), which a fixed list can never keep up with since worktree names are randomly generated per-worktree.
+- Exact slugs (e.g. `"C--Users-me-projects-my-app"`) — back up only that one project, no worktrees, no future additions. Use this to intentionally scope down (e.g. exclude a project with sensitive session content).
+- Prefix globs (e.g. `"C--Users-me-projects-myproject*"`) — back up a project **and** all of its worktree sessions, without picking up unrelated projects. Bash glob syntax (`*`, `?`, `[...]`).
+- `[]` (empty) — back up no project/session data at all. This is a deliberate opt-out, not the same as "not configured."
+
+Mixing is fine — e.g. `["*"]` for everything, or `["C--Users-me-projects-myproject*", "C--Users-me-projects-my-app"]` to scope to two specific things.
 
 ### Backup repository layout
 
@@ -567,6 +573,12 @@ On Windows, also confirm the next scheduled run writes a `1000` event: `Get-Even
 > **First `--fast` run after upgrading:** if your backup repo was last written by byte-exact runs, the first `--fast` run re-stamps every file's mtime once (so it isn't faster *that* run); subsequent runs get the speedup.
 
 ## Changelog
+
+### v2.5.0 (2026-07-07)
+
+- **Changed: `projects` is now pattern-based, with dynamic discovery.** Previously `backup-config.json`'s `projects` array was a fixed allowlist of exact directory names under `~/.claude/projects/` — anything not literally listed was silently skipped. This missed every git worktree session (Claude Code creates a new, randomly-named project slug per worktree, e.g. `C--Users-me-projects-myproject--claude-worktrees-<name>-<hash>`), since a static list can never keep up with names generated after the config was written. `projects` entries are now matched as bash glob patterns against `~/.claude/projects/` at backup time: `["*"]` (the new recommended default) discovers everything, including future projects and worktrees; a prefix glob like `"C--Users-me-projects-myproject*"` scopes to one project plus all its worktrees; exact slugs still work unchanged for users who deliberately scope down; `[]` still means "back up no project/session data" (unchanged opt-out).
+- **`init.sh`'s "all" selection** now writes `["*"]` instead of a point-in-time snapshot list, so a fresh setup stays complete as new projects and worktrees appear.
+- **No config schema changes** — existing `backup-config.json` (version `1`) continues to work without edits; a config with an explicit list of exact slugs behaves exactly as before.
 
 ### v2.4.0 (2026-06-28)
 

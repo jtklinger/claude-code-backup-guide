@@ -12,7 +12,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.4.0"
+SCRIPT_VERSION="2.5.0"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -163,7 +163,9 @@ else
 
         echo ""
         echo "Enter project numbers to include, separated by spaces."
-        echo "Type 'all' to include everything, or 'none' to skip."
+        echo "Type 'all' to include everything (now AND any project or worktree"
+        echo "created later — dynamic discovery via the \"*\" pattern), or 'none'"
+        echo "to skip project/session backup entirely."
         echo ""
         printf "Selection: "
         read -r selection
@@ -171,8 +173,8 @@ else
         SELECTED_PROJECTS=()
 
         if [ -z "$selection" ] || [ "$selection" = "all" ]; then
-            SELECTED_PROJECTS=("${PROJECT_NAMES[@]}")
-            echo -e "${GREEN}Selected all ${#PROJECT_NAMES[@]} project(s).${NC}"
+            SELECTED_PROJECTS=("*")
+            echo -e "${GREEN}Selected all projects, discovered dynamically (\"*\").${NC}"
         elif [ "$selection" = "none" ]; then
             SELECTED_PROJECTS=()
             echo -e "${YELLOW}No projects selected.${NC}"
@@ -240,7 +242,11 @@ echo "=============================="
 echo ""
 echo "Backup directory: $BACKUP_DIR"
 echo "Config file:      $CONFIG_FILE"
-echo "Projects:         ${#SELECTED_PROJECTS[@]} selected"
+if [ "${#SELECTED_PROJECTS[@]}" -eq 1 ] && [ "${SELECTED_PROJECTS[0]}" = "*" ]; then
+    echo "Projects:         all (dynamic discovery)"
+else
+    echo "Projects:         ${#SELECTED_PROJECTS[@]} selected"
+fi
 echo ""
 echo -e "${GREEN}Next steps:${NC}"
 echo ""
