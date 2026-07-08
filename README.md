@@ -547,6 +547,7 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 ### Unreleased
 
 - **Cleanup:** removed a dead unused-count capture in `backup_todos()` (mirrors the `mem_count` cleanup done in v2.5.0; no behavior change).
+- **Portable default:** the Windows scripts' `BackupDir` default is now `$env:USERPROFILE\claude-code-backup` instead of a hardcoded user path — works for any user out of the box. The scheduled task still passes `-BackupDir` explicitly, so existing installs are unaffected.
 
 ### v2.5.0 (2026-07-07)
 
