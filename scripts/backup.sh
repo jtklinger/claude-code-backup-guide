@@ -21,7 +21,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.4.0"
+SCRIPT_VERSION="2.5.0"
 
 # Colors for output
 GREEN='\033[0;32m'
@@ -104,15 +104,46 @@ parse_config() {
     GIT_REMOTE=$(jq -r '.git_remote // "origin"' "$config_file" | tr -d '\r')
     GIT_BRANCH=$(jq -r '.git_branch // "main"' "$config_file" | tr -d '\r')
 
-    # Read projects array
-    PROJECTS=()
-    while IFS= read -r proj; do
-        proj="${proj%$'\r'}"  # Strip Windows carriage return
-        [ -n "$proj" ] && PROJECTS+=("$proj")
-    done < <(jq -r '.projects[]? // empty' "$config_file")
-
     # Expand ~ to $HOME in claude_dir
     CLAUDE_DIR="${CLAUDE_DIR/#\~/$HOME}"
+
+    # Read the projects array: each entry is an exact project slug, a glob
+    # pattern (e.g. "C--Users-me-projects-Homelab*" to catch a project and
+    # all its worktree sessions), or "*" alone for full dynamic discovery.
+    # An empty array means "back up no project/session data" (opt-out, kept
+    # for anyone who intentionally excludes session history).
+    local -a project_patterns=()
+    while IFS= read -r proj; do
+        proj="${proj%$'\r'}"  # Strip Windows carriage return
+        [ -n "$proj" ] && project_patterns+=("$proj")
+    done < <(jq -r '.projects[]? // empty' "$config_file")
+
+    PROJECTS=()
+    if [ ${#project_patterns[@]} -gt 0 ] && [ -d "$CLAUDE_DIR/projects" ]; then
+        local -A seen=()
+        local pattern matched dir name
+        for pattern in "${project_patterns[@]}"; do
+            matched=false
+            shopt -s nullglob
+            for dir in "$CLAUDE_DIR/projects/"$pattern; do
+                [ -d "$dir" ] || continue
+                name=$(basename "$dir")
+                if [ -z "${seen[$name]:-}" ]; then
+                    PROJECTS+=("$name")
+                    seen[$name]=1
+                fi
+                matched=true
+            done
+            shopt -u nullglob
+            # Literal (non-glob) entries that don't exist yet are kept as-is
+            # so backup_projects() can still warn "not found" instead of the
+            # entry silently vanishing.
+            if [ "$matched" = false ] && [[ "$pattern" != *'*'* ]] && [ -z "${seen[$pattern]:-}" ]; then
+                PROJECTS+=("$pattern")
+                seen[$pattern]=1
+            fi
+        done
+    fi
 
     log_info "Config loaded: claude_dir=$CLAUDE_DIR, ${#PROJECTS[@]} project(s)"
 }

@@ -21,6 +21,7 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 
 - All scripts use `set -e` and colored output (`GREEN`/`YELLOW`/`RED`/`NC`)
 - Config is `backup-config.json` in backup repo root — parsed with `jq`
+- `projects` in the config is pattern-based (bash globs), resolved dynamically against `~/.claude/projects/` at backup time — not a fixed list. `["*"]` (default) discovers everything including git worktree sessions, whose slugs are randomly generated per-worktree and can't be enumerated in advance. Exact slugs and prefix globs still work for scoping down; `[]` opts out of project/session backup entirely.
 - Change detection via `cmp -s` (byte-exact) by default to avoid unnecessary git commits; `backup.sh --fast` switches to size + mtime (one `stat` per file, skips reading every byte) — opt-in, default stays byte-exact
 - Skills sync prefers `rsync --delete` with fallback to manual `find`/`cp`
 - Session .jsonl files are stored in `projects/<name>/sessions/` in the backup but restored to `projects/<name>/` (the project root) where Claude Code reads them
