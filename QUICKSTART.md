@@ -5,7 +5,7 @@ Back up your Claude Code settings in 5 minutes.
 ## Prerequisites
 
 - Claude Code installed (run it at least once so `~/.claude/` exists)
-- Git, bash, and **jq** installed
+- Git, **bash 4+**, and **jq** installed. Windows Git Bash and modern Linux ship bash 4+; stock macOS ships bash 3.2, so on macOS run `brew install bash` and invoke the scripts with the newer bash (e.g. `/opt/homebrew/bin/bash scripts/backup.sh .`).
 - A GitHub account (or other Git hosting)
 
 ## Backup Setup
@@ -17,6 +17,7 @@ cd claude-code-backup
 
 # 2. Get the scripts (clone guide repo or copy scripts/ directory)
 git clone https://github.com/jtklinger/claude-code-backup-guide.git /tmp/cbg
+mkdir -p scripts                      # the fresh backup repo has no scripts/ yet
 cp /tmp/cbg/scripts/*.sh ./scripts/
 cp /tmp/cbg/templates/.gitignore .
 
@@ -36,14 +37,13 @@ Done. Your settings, MCP config, skills, plans, commands, session transcripts, t
 
 | Category | Source | Details |
 |---|---|---|
-| Global settings | `~/.claude/` | CLAUDE.md, settings.json, keybindings.json, extra *.md files |
+| Global settings | `~/.claude/` | CLAUDE.md, settings.json, keybindings.json, extra *.md files, and custom root scripts (`*.cmd/*.ps1/*.js/*.sh/*.py`) |
 | MCP config | `~/.claude.json` | Full file (server definitions, OAuth tokens) |
 | Skills | `~/.claude/skills/` | All skill files |
-| Plugins | `~/.claude/plugins/` | Registry files (not cache) |
-| Plans | `~/.claude/plans/` | Saved plan documents |
-| Commands | `~/.claude/commands/` | Custom slash commands |
+| Plugins | `~/.claude/plugins/` | Registry files + persistent plugin state under `plugins/data/` (not cache) |
+| User content | `~/.claude/` | plans, commands, agents, output-styles, rules, hooks, scheduled-tasks |
 | Todos | `~/.claude/todos/` | Per-session task state |
-| Projects | `~/.claude/projects/` | MEMORY.md, topic files, session transcripts |
+| Projects | `~/.claude/projects/` | MEMORY.md, topic files, session transcripts, subagent transcripts, tool-result payloads — every project and worktree by default (`projects: ["*"]`) |
 
 ## Restore on New Machine
 
@@ -71,6 +71,12 @@ Use `--yes` to skip prompts and restore everything: `bash scripts/restore.sh . -
 
 ```
 0 2 * * * /path/to/scripts/backup.sh /path/to/claude-code-backup
+```
+
+On macOS, the script's `#!/bin/bash` shebang points at the stock 3.2 bash, which the scripts reject — invoke the Homebrew bash explicitly:
+
+```
+0 2 * * * /opt/homebrew/bin/bash /path/to/scripts/backup.sh /path/to/claude-code-backup
 ```
 
 **Windows (Task Scheduler):**

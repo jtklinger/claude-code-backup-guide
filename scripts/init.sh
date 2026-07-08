@@ -14,6 +14,15 @@ set -e
 
 SCRIPT_VERSION="2.5.0"
 
+# This backup toolkit requires bash 4+ (backup.sh uses associative arrays). Enforce
+# the same requirement here so setup fails early with a clear message on stock macOS
+# bash 3.2 rather than generating a config the backup can't then use.
+if [ -z "${BASH_VERSINFO:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+    echo "Error: this script requires bash 4.0+ (found ${BASH_VERSION:-non-bash shell})." >&2
+    echo "On macOS: 'brew install bash', then run with the newer bash (e.g. /opt/homebrew/bin/bash)." >&2
+    exit 1
+fi
+
 # Colors for output
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
@@ -134,15 +143,14 @@ else
         [ -z "$dir_name" ] && continue
         PROJECT_NAMES+=("$dir_name")
 
-        # Convert hash name to human-readable path:
+        # Convert the Claude project slug to a human-readable path (display only —
+        # the real slug is kept in PROJECT_NAMES):
         #   C--Users-me-projects-myproject  ->  C:/Users/me/projects/myproject
-        # Step 1: Replace leading "C--" with "C:/"
         readable="$dir_name"
-        readable="$(echo "$readable" | sed 's/^C--/C:\//')"
-        # Step 2: Replace all remaining "--" with "/"
+        # Leading "<letter>--" is the encoded "<drive>:/" prefix (any drive, not just C:)
+        readable="$(echo "$readable" | sed -E 's/^([A-Za-z])--/\1:\//')"
+        # Remaining "--" then single "-" are path separators in the slug scheme
         readable="$(echo "$readable" | sed 's/--/\//g')"
-        # Step 3: Replace remaining single "-" with "/" for path separators
-        # Actually, single dashes ARE path separators in the Claude hash scheme
         readable="$(echo "$readable" | sed 's/-/\//g')"
 
         PROJECT_DISPLAY+=("$readable")

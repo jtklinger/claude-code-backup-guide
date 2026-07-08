@@ -30,7 +30,7 @@ This guide provides three scripts that back up the full Claude Code data model t
 - **`backup.sh`** — Config-driven, modular backup with auto-commit and optional auto-push. Fully non-interactive (safe for cron).
 - **`restore.sh`** — Interactive restore with per-category prompts (`--yes` for unattended; `--dry-run` to preview without writing).
 
-**Requirements:** bash, git, [jq](https://jqlang.github.io/jq/)
+**Requirements:** bash 4+, git, [jq](https://jqlang.github.io/jq/). The scripts use associative arrays, so bash 4 or newer is required — stock macOS ships bash 3.2, so on macOS run `brew install bash` and invoke with the newer bash (e.g. `/opt/homebrew/bin/bash`). Windows Git Bash and modern Linux already ship bash 4+.
 
 ## What to Backup
 
@@ -199,13 +199,16 @@ claude-code-backup/
 │   ├── settings.local.json
 │   ├── keybindings.json
 │   ├── claude.json              # ~/.claude.json (MCP config + OAuth)
+│   ├── unlock-secrets.ps1            # v2.2+: custom root scripts (*.cmd/*.ps1/*.js/*.sh/*.py)
 │   └── PROJECT-CONTEXT.md       # any extra *.md files
 ├── skills/
 │   └── <skill-packages>/
 ├── plugins/
 │   ├── installed_plugins.json
 │   ├── blocklist.json
-│   └── known_marketplaces.json
+│   ├── known_marketplaces.json
+│   └── data/                    # v2.2+: persistent plugin state
+│       └── <plugin-name>/
 ├── plans/
 │   └── <plan>.md
 ├── commands/
@@ -319,7 +322,7 @@ To push to your remote after every backup, edit `backup-config.json`:
 }
 ```
 
-The backup script will attempt to push after committing. If the push fails, it logs a warning but does not exit with an error.
+The backup script attempts to push after committing. The local commit always succeeds first; if the push then fails **and `git_auto_push` is enabled**, the script logs the error and exits non-zero (so a scheduled run reports failure and the Windows watchdog notices, rather than toasting success while the off-machine copy silently ages out of sync). The commit is preserved and the next run retries the push. If `git_auto_push` is `false`, no push is attempted and the run exits 0 after committing locally.
 
 ## Sanitized Export for Sharing
 
@@ -462,7 +465,7 @@ find ~/claude-code-backup/projects/*/sessions/ -name "*.jsonl" -mtime +30 -delet
 
 **Solutions:**
 
-1. Verify the project is listed in `backup-config.json` under `projects`
+1. Verify the project would be captured by `backup-config.json`'s `projects` patterns — the default `["*"]` backs up every project, so no edit is needed unless you've scoped it down to specific slugs/globs
 2. Check that the project directory name matches exactly (case-sensitive)
 3. Restart Claude Code after restoring -- memory files are read on startup
 4. Verify the files exist: `ls ~/.claude/projects/<project-name>/memory/`
@@ -533,44 +536,11 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Q: Can I add new projects after initial setup?
 
-**A:** Yes. Either re-run `init.sh` (it will ask before overwriting the config), or manually edit `backup-config.json` and add the project directory name to the `projects` array. Find directory names with `ls ~/.claude/projects/`.
+**A:** With the default `projects: ["*"]` config (what `init.sh`'s "all" selection now writes), **no action is needed** — new projects and worktree sessions are discovered automatically on the next backup. You only need to edit `backup-config.json` if you've deliberately scoped `projects` down to specific slugs or prefix globs; in that case add another pattern to the `projects` array (find directory names with `ls ~/.claude/projects/`), or re-run `init.sh` (it will ask before overwriting the config).
 
 ### Q: What happens to existing files during restore?
 
 **A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version.
-
-## Upgrading an existing deployment
-
-Upgrades within v2.x are **additive and backward-compatible** — no `backup-config.json` changes, and a backup made with an older v2.x restores fine with a newer script (and vice-versa). To upgrade:
-
-**1. Pull the new scripts**
-
-```bash
-cd /path/to/claude-code-backup-guide   # e.g. C:\Users\me\projects\claude-code-backup-guide
-git pull
-```
-
-That's all the portable tool needs — `backup.sh` / `restore.sh` are read fresh on each run, so cron or Task Scheduler jobs that invoke them by path pick up the new version automatically.
-
-**2. (Windows only) Re-run the installer to adopt new task options**
-
-If you use the Windows observability layer and want new switches baked into the scheduled task (e.g. `-Fast` / `-Silent` from v2.4.0), re-run the **elevated** installer:
-
-```powershell
-powershell -NoProfile -ExecutionPolicy Bypass -File "...\scripts\windows\install.ps1" -Fast -Silent
-```
-
-It's idempotent — it updates the existing tasks in place (triggers and principal preserved). Skip this step if your upgrade only changed `backup.sh` behavior, not the task wiring.
-
-**3. Verify**
-
-```bash
-bash scripts/backup.sh /path/to/your-backup --status    # last commit, sync state, sizes
-```
-
-On Windows, also confirm the next scheduled run writes a `1000` event: `Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 1`.
-
-> **First `--fast` run after upgrading:** if your backup repo was last written by byte-exact runs, the first `--fast` run re-stamps every file's mtime once (so it isn't faster *that* run); subsequent runs get the speedup.
 
 ## Changelog
 
@@ -578,6 +548,14 @@ On Windows, also confirm the next scheduled run writes a `1000` event: `Get-Even
 
 - **Changed: `projects` is now pattern-based, with dynamic discovery.** Previously `backup-config.json`'s `projects` array was a fixed allowlist of exact directory names under `~/.claude/projects/` — anything not literally listed was silently skipped. This missed every git worktree session (Claude Code creates a new, randomly-named project slug per worktree, e.g. `C--Users-me-projects-myproject--claude-worktrees-<name>-<hash>`), since a static list can never keep up with names generated after the config was written. `projects` entries are now matched as bash glob patterns against `~/.claude/projects/` at backup time: `["*"]` (the new recommended default) discovers everything, including future projects and worktrees; a prefix glob like `"C--Users-me-projects-myproject*"` scopes to one project plus all its worktrees; exact slugs still work unchanged for users who deliberately scope down; `[]` still means "back up no project/session data" (unchanged opt-out).
 - **`init.sh`'s "all" selection** now writes `["*"]` instead of a point-in-time snapshot list, so a fresh setup stays complete as new projects and worktrees appear.
+- **Pre-release hardening pass** (same release, no schema change):
+  - **`--sanitize` credential redaction hardened.** `Authorization: Bearer` tokens are now redacted in both `--header <value>` and `--header=<value>` forms and case-insensitively (previously the common `Authorization:` capitalization leaked through in cleartext). `settings.json`'s top-level `env` values are now redacted, arbitrary `plugins/data/` state is excluded from exports, and the export README flags non-MCP `Bash(...)` allow-rules (e.g. `Bash(ssh <host>:*)`) for manual review since only `mcp__…` permission names are auto-redacted.
+  - **No more silent backups.** A failed `git add` (e.g. a stale `.git/index.lock`) now aborts loudly with a non-zero exit instead of being swallowed and reported as "No changes detected."
+  - **Backups are now self-sufficient.** `backup.sh` stages `backup-config.json` and `.gitignore`, so a fresh clone is a valid, restorable backup repo (previously a disaster-recovery clone hard-failed with "Config file not found").
+  - **Restore fidelity.** `restore.sh` now restores custom root scripts (`*.cmd/*.ps1/*.js/*.sh/*.py`) and `plugins/data/`, both of which were backed up but never written back. `restore.sh --dry-run` no longer creates empty directories — it truly writes nothing.
+  - **Config edge cases.** An absent `projects` key now defaults to `["*"]` (back up everything) like every other field's default, rather than backing up nothing; patterns containing spaces are handled as single literal tokens.
+  - **Push failures surface.** When `git_auto_push` is enabled, a push failure now exits non-zero (the local commit is preserved) so scheduled-run status and the Windows watchdog reflect that the off-machine copy is out of sync.
+  - **Requires bash 4+** explicitly, with a clear up-front error. Stock macOS bash 3.2 was never actually supported (associative arrays); on macOS run `brew install bash`.
 - **No config schema changes** — existing `backup-config.json` (version `1`) continues to work without edits; a config with an explicit list of exact slugs behaves exactly as before.
 
 ### v2.4.0 (2026-06-28)
@@ -628,59 +606,60 @@ On Windows, also confirm the next scheduled run writes a `1000` event: `Get-Even
 
 ## Upgrading
 
+Upgrades within v2.x are **additive and backward-compatible** — no `backup-config.json` changes, and a backup made with an older v2.x restores fine with a newer script (and vice-versa).
+
 ### Typical upgrade flow
 
-The scripts run directly out of the guide repo — your scheduled task, cron job, or manual command points at `/path/to/claude-code-backup-guide/scripts/backup.sh`. Upgrading is a two-step `git pull`:
+**1. Pull the new scripts.** The scripts run directly out of the guide repo — your scheduled task, cron job, or manual command points at `/path/to/claude-code-backup-guide/scripts/backup.sh`, which is read fresh on each run, so jobs pick up the new version automatically:
 
 ```bash
 cd /path/to/claude-code-backup-guide
 git pull
 ```
 
-Confirm the new version on the next run — every script prints its version in the banner:
+**2. (Windows only) Re-run the installer to adopt new task options.** If you use the Windows observability layer and want new switches baked into the scheduled task (e.g. `-Fast` / `-Silent`), re-run the **elevated** installer — it's idempotent and updates the existing tasks in place (triggers and principal preserved):
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File "...\scripts\windows\install.ps1" -Fast -Silent
+```
+
+Skip this if your upgrade only changed `backup.sh` behavior, not the task wiring.
+
+**3. Verify.** Every script prints its version in the banner; confirm the new run via `--status`:
+
+```bash
+bash scripts/backup.sh /path/to/your-backup --status    # version, last commit, sync state, sizes
+```
 
 ```
-Claude Code Backup Script v2.1.0
+Claude Code Backup Script v2.5.0
 ==================================
 ```
 
-Compare the banner against the [Changelog](#changelog) to confirm you picked up the expected release.
+Compare the banner against the [Changelog](#changelog) to confirm you picked up the expected release. On Windows, also confirm the next scheduled run writes a `1000` event: `Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 1`.
+
+> **First `--fast` run after upgrading:** if your backup repo was last written by byte-exact runs, the first `--fast` run re-stamps every file's mtime once (so it isn't faster *that* run); subsequent runs get the speedup.
 
 ### What happens to your existing backup repo
 
-Backups are **additive across releases**. When v2.1 adds new categories (scheduled-tasks, subagents, tool-results, etc.), the first backup run after upgrade will:
-
-- Create the new top-level directories (`scheduled-tasks/`, `agents/`, `output-styles/`, `rules/`, `hooks/`) — only if you have source data for them under `~/.claude/`
-- Add `subagents/` and `tool-results/` subdirectories inside each backed-up project
-- Commit the additions with the usual `Backup Claude Code settings -- <timestamp>` message
-
-Existing directories (`global/`, `skills/`, `plans/`, `commands/`, `todos/`, `projects/<hash>/memory/`, `projects/<hash>/sessions/`) are untouched. No data is moved or renamed. No config edits required.
-
-Run the backup twice after upgrade — the first run catches up new categories, the second should report "No changes detected", confirming idempotency.
+Backups are **additive across releases**. When a release adds new categories, the first backup run after upgrade creates the new directories (only if you have matching source data under `~/.claude/`) and commits them with the usual `Backup Claude Code settings -- <timestamp>` message. Existing directories are untouched — no data is moved or renamed, no config edits required. Run the backup twice after upgrade: the first run catches up new categories, the second should report "No changes detected", confirming idempotency.
 
 ### Version-skew safety
 
-If your backup repo was produced by an older script and you restore with a newer script (or vice versa), both directions work for v2.0 ↔ v2.1:
-
-| Scenario | Behavior |
-|----------|----------|
-| v2.0 `backup.sh` → v2.1 `restore.sh` | Restore skips new categories (they don't exist in the backup) — no errors. |
-| v2.1 `backup.sh` → v2.0 `restore.sh` | Old restore ignores directories it doesn't know about. New categories stay in the backup repo unused until you upgrade the restore side. |
-
-This is safe because v2.1's additions are purely additive. **Future major version bumps may break this** — the changelog entry for any such release will flag the incompatibility explicitly.
+Within the v2.x line, a backup produced by one script version restores with any other v2.x script in both directions — a newer restore skips categories a newer backup would have added but an older one didn't, and an older restore ignores directories it doesn't recognize (they stay in the backup unused until you upgrade). This is safe because v2.x additions are purely additive. **Future major version bumps may break this** — the changelog entry for any such release will flag the incompatibility explicitly.
 
 ### Pinning to a specific version
 
-Once we start tagging releases, you can pin your machine to a known-good version:
+Releases are tagged, so you can pin a machine to a known-good version:
 
 ```bash
 cd /path/to/claude-code-backup-guide
-git checkout v2.1.0   # stay on the exact release
+git checkout v2.5.0   # stay on the exact release
 # ... later, when you want to upgrade:
 git checkout master && git pull
 ```
 
-Pin if you're running this on multiple machines and want to roll out upgrades deliberately, or if a release causes issues and you want to roll back. Otherwise tracking `master` is fine — the scripts are small enough that breaking changes will be rare and well-documented.
+Pin if you're rolling out upgrades deliberately across multiple machines, or want to roll back a release that caused issues. Otherwise tracking `master` is fine — the scripts are small and breaking changes are rare and well-documented.
 
 ### What to watch for after a major upgrade
 
@@ -698,7 +677,7 @@ This tool uses two distinct version numbers, which move independently:
 
 | Version | Where it lives | Bumped when |
 |---------|---------------|-------------|
-| **Script version** (`SCRIPT_VERSION="2.1.0"` in each script, printed in the banner) | `scripts/*.sh` | Every release. Follows [SemVer](https://semver.org): major for breaking changes to invocation or output layout, minor for new features, patch for bug fixes. |
+| **Script version** (`SCRIPT_VERSION="2.5.0"` in each script, printed in the banner) | `scripts/*.sh` | Every release. Follows [SemVer](https://semver.org): major for breaking changes to invocation or output layout, minor for new features, patch for bug fixes. |
 | **Config schema version** (`"version": 1` in `backup-config.json`) | `backup-config.json`, enforced at parse time | Only when the config file format changes in a backwards-incompatible way. Currently `1`. |
 
 If you're reporting an issue, include the script ve
