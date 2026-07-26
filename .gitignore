@@ -1,2 +1,4 @@
 # Claude Code per-project session state — not part of this tool's source
-.claude/
+# (settings.json is deliberately tracked: worktree.baseRef standard)
+.claude/*
+!.claude/settings.json

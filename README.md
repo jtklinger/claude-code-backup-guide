@@ -661,10 +661,10 @@ Releases are tagged, so you can pin a machine to a known-good version:
 cd /path/to/claude-code-backup-guide
 git checkout v2.5.0   # stay on the exact release
 # ... later, when you want to upgrade:
-git checkout master && git pull
+git checkout main && git pull
 ```
 
-Pin if you're rolling out upgrades deliberately across multiple machines, or want to roll back a release that caused issues. Otherwise tracking `master` is fine — the scripts are small and breaking changes are rare and well-documented.
+Pin if you're rolling out upgrades deliberately across multiple machines, or want to roll back a release that caused issues. Otherwise tracking `main` is fine — the scripts are small and breaking changes are rare and well-documented.
 
 ### What to watch for after a major upgrade
 
