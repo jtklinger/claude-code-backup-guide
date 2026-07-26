@@ -15,7 +15,7 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 - `templates/backup-config.json` — Default config template
 - `docs/plans/` — Design documents
 - `scripts/windows/` — **Optional Windows-only observability layer** (PowerShell): wraps the scheduled backup to log each run to a file + the Windows Event Log and toast on success/failure, plus a watchdog for missed runs. Does not modify the portable `backup.sh`. Install with `-Fast` (bake in `--fast`) and/or `-Silent` (hidden window, no console pop-up). See `scripts/windows/README.md`.
-- `.github/workflows/lint.yml` — **CI lint guard**: `bash -n` on every script (hard gate) + ShellCheck/PSScriptAnalyzer (advisory) on push/PR. Stops a syntax-broken script (the v2.2.0 failure mode) from reaching `master`.
+- `.github/workflows/lint.yml` — **CI lint guard**: `bash -n` on every script (hard gate) + ShellCheck/PSScriptAnalyzer (advisory) on push/PR. Stops a syntax-broken script (the v2.2.0 failure mode) from reaching `main`.
 
 ## Key Conventions
 
@@ -55,3 +55,10 @@ bash scripts/restore.sh /tmp/test-backup --yes
 # Cleanup
 rm -rf /tmp/test-backup
 ```
+
+## Delivery (all repos standard)
+
+Never commit to main. Branch (`feat/…`, `fix/…`, `docs/…`, `chore/…`) → `git push -u` →
+PR → squash-merge only on Jeremy's go-ahead. Full standard: projects-root `CLAUDE.md`
+(the repo behind `C:\Users\jtkli\projects`). Releases keep this repo's existing ritual:
+version bump in all three scripts + README changelog → PR → tag `vX.Y.Z` → GitHub Release.
