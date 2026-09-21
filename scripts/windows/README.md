@@ -5,8 +5,8 @@ An optional **Windows-only** layer that makes the scheduled backup observable: e
 ## What it does
 
 - **`backup-wrapper.ps1`** — the Task Scheduler entry point. Runs `..\backup.sh` via Git-bash, captures its output and exit code, writes a daily log file + a Windows Event Log entry, updates a state file, and shows a toast (success *and* failure). It re-emits the bash exit code so `LastTaskResult` stays accurate. Accepts `-Fast` (pass `--fast` through to backup.sh) and `-Silent` (hidden window).
-- **`backup-watchdog.ps1`** — read-only. Run at logon + every 4h; toasts + writes a Warning event if no successful backup happened within ~13h (one missed scheduled slot).
-- **`install.ps1`** — idempotent one-time setup (registers the Event Log source, re-points the backup task at the wrapper, creates the watchdog task).
+- **`backup-watchdog.ps1`** — read-only. Run at logon + every 4h; toasts + writes a Warning event if no successful backup happened within ~13h (one missed scheduled slot). It locates `last-run.json` from `-BackupDir`, so that **must match the wrapper's** — `install.ps1` passes it explicitly for this reason. A watchdog pointed at the wrong directory finds no state file and reports *"no successful backup since never"* on every single check, which trains you to ignore the one alert that matters.
+- **`install.ps1`** — idempotent one-time setup (registers the Event Log source, re-points the backup task at the wrapper, creates the watchdog task, and clears the Task Scheduler conditions that would otherwise skip runs on a laptop — see [Laptop conditions](#laptop-conditions)).
 - **`toast.ps1`** — shared toast helper (built-in Windows toast API; no external module).
 
 ## One-time setup
@@ -25,6 +25,36 @@ Re-running it is safe; it updates the tasks in place.
 - **`-Silent`** — runs the backup *and* watchdog tasks with a hidden window, so nothing pops up on screen during the (multi-minute) run. Toasts still appear — they use a separate API and the tasks still run in your interactive session.
 
 Both are optional. Omit them for the original behavior (visible window, byte-exact `cmp`).
+
+## Laptop conditions
+
+Task Scheduler's default conditions will quietly stop a backup from running on a laptop. `install.ps1` clears all three on both tasks; on a desktop they are no-ops.
+
+| Setting | Default | Installed as | Why |
+|---------|---------|--------------|-----|
+| `DisallowStartIfOnBatteries` | `True` | `False` | A run starting on battery is **refused**, surfacing only as `LastTaskResult` = `0x800710E0` ("The operator or administrator has refused the request") with no log file written at all |
+| `StopIfGoingOnBatteries` | `True` | `False` | Unplugging mid-run **kills** the backup — likely, since a full run takes minutes |
+| `StartWhenAvailable` | `False` | `True` | A run missed while the machine was off or asleep is **never retried**, so a weekend powered down silently costs every scheduled slot |
+
+These bite together: the machine sleeps through a scheduled slot, nothing catches up, and the next attempt after resume is refused because it is still on battery. The result is a backup that has not run for days while every individual run still looks "fine".
+
+If you created the backup task by hand and are not running `install.ps1`, apply them yourself:
+
+```powershell
+foreach ($n in 'Claude Code Backup','Claude Code Backup Watchdog') {
+    $s = (Get-ScheduledTask $n).Settings
+    $s.DisallowStartIfOnBatteries = $false
+    $s.StopIfGoingOnBatteries     = $false
+    $s.StartWhenAvailable         = $true
+    Set-ScheduledTask -TaskName $n -Settings $s | Out-Null
+}
+```
+
+Task Scheduler's own history is **off** by default, which is what makes a refused run hard to diagnose after the fact. Turn it on once, elevated:
+
+```powershell
+wevtutil set-log Microsoft-Windows-TaskScheduler/Operational /enabled:true
+```
 
 ## Where things live
 
