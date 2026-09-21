@@ -35,13 +35,30 @@ $backupPsArgs += " -File `"$wrapper`" -BackupDir `"$BackupDir`""
 if ($Fast)   { $backupPsArgs += " -Fast" }
 if ($Silent) { $backupPsArgs += " -Silent" }
 $backupAction = New-ScheduledTaskAction -Execute $ps -Argument $backupPsArgs
-Set-ScheduledTask -TaskName $BackupTaskName -Action $backupAction | Out-Null
+
+# A backup must never be skipped just because the machine happened to be unplugged or asleep.
+# Task Scheduler's defaults are hostile to that on a laptop: DisallowStartIfOnBatteries and
+# StopIfGoingOnBatteries are ON (a run on battery is refused, or killed if you unplug mid-run,
+# reported only as LastTaskResult 0x800710E0 "The operator or administrator has refused the
+# request") and StartWhenAvailable is OFF (a run missed while the machine was off/asleep is
+# never retried). Clear all three; on a desktop they are harmless no-ops. Settings are fetched
+# from the live task so the rest of its configuration is preserved.
+$backupSettings = (Get-ScheduledTask -TaskName $BackupTaskName).Settings
+$backupSettings.DisallowStartIfOnBatteries = $false
+$backupSettings.StopIfGoingOnBatteries     = $false
+$backupSettings.StartWhenAvailable         = $true
+Set-ScheduledTask -TaskName $BackupTaskName -Action $backupAction -Settings $backupSettings | Out-Null
 Write-Host "Repointed '$BackupTaskName' at backup-wrapper.ps1 (Fast=$($Fast.IsPresent), Silent=$($Silent.IsPresent))."
+Write-Host "  Cleared battery restrictions and enabled missed-run catch-up on '$BackupTaskName'."
 
 # 3. Create/update the watchdog task: at logon + every 4h, interactive, limited.
 $wdPsArgs = "-NoProfile -ExecutionPolicy Bypass"
 if ($Silent) { $wdPsArgs += " -WindowStyle Hidden" }
-$wdPsArgs += " -File `"$watchdog`""
+# Pass -BackupDir explicitly: the watchdog derives the state-file path from it, so letting it
+# fall back to its own default means a default that drifts from -BackupDir silently points the
+# watchdog at a state file that does not exist -- which it reports as "no successful backup
+# since never" on every check, burying real alerts in noise.
+$wdPsArgs += " -File `"$watchdog`" -BackupDir `"$BackupDir`""
 if ($Silent) { $wdPsArgs += " -Silent" }
 $wdAction  = New-ScheduledTaskAction -Execute $ps -Argument $wdPsArgs
 $tLogon    = New-ScheduledTaskTrigger -AtLogOn -User $user
@@ -54,11 +71,13 @@ $rep.Interval = "PT4H"
 $rep.StopAtDurationEnd = $false
 $tRepeat.Repetition = $rep
 $principal = New-ScheduledTaskPrincipal -UserId $user -LogonType Interactive -RunLevel Limited
-$settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable
+$settings  = New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -StartWhenAvailable `
+    -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 Register-ScheduledTask -TaskName $WatchdogTaskName -Action $wdAction `
     -Trigger @($tLogon, $tRepeat) -Principal $principal -Settings $settings -Force | Out-Null
 Write-Host "Installed watchdog task '$WatchdogTaskName' (logon + every 4h)."
 
 Write-Host "`nDone. Verify with:"
 Write-Host "  (Get-ScheduledTask '$BackupTaskName').Actions"
+Write-Host "  (Get-ScheduledTask '$BackupTaskName').Settings | Format-List DisallowStartIfOnBatteries,StopIfGoingOnBatteries,StartWhenAvailable"
 Write-Host "  Get-ScheduledTaskInfo '$WatchdogTaskName'"
