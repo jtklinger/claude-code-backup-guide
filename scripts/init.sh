@@ -12,7 +12,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.5.0"
+SCRIPT_VERSION="2.5.1"
 
 # This backup toolkit requires bash 4+ (backup.sh uses associative arrays). Enforce
 # the same requirement here so setup fails early with a clear message on stock macOS
