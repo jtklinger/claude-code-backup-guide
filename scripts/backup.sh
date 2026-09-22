@@ -21,7 +21,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.5.0"
+SCRIPT_VERSION="2.5.1"
 
 # Associative arrays (per-category counters + the project-dedup `seen` map) require
 # bash 4+. Stock macOS ships bash 3.2, where `declare -A` fails at runtime. Check up

@@ -1,6 +1,6 @@
 # Claude Code Backup & Restore Guide
 
-**Current release: v2.5.0** (see [changelog](#changelog))
+**Current release: v2.5.1** (see [changelog](#changelog))
 
 A config-driven system for backing up and restoring your complete Claude Code environment — settings, memory, skills, plugins, user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), sessions, subagent transcripts, tool-result payloads, and more.
 
@@ -544,7 +544,7 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ## Changelog
 
-### Unreleased
+### v2.5.1 (2026-09-22)
 
 - **Fixed: Windows backups failed outright once any project path exceeded `MAX_PATH` (260).** Claude Code's auto-generated project slugs (a scratch-workspace slug embeds two UUIDs) can push `projects/<slug>/sessions/<uuid>.jsonl` past the limit, and without `core.longpaths` git aborts the whole `git add` with `Filename too long` — every run, until the repo is configured by hand. Became reachable in v2.5.0 once `["*"]` started discovering every project directory. `init.sh` now sets `core.longpaths true` on new Windows backup repos, and `backup.sh` sets it on existing ones the next time it runs (repo-scoped, idempotent, logged when it fires). macOS and Linux are untouched.
 - **Fixed: the Windows scheduled backup could silently never run on a laptop.** `install.ps1` set the tasks' *actions* but never their *conditions*, so both tasks inherited Task Scheduler's defaults: `DisallowStartIfOnBatteries` and `StopIfGoingOnBatteries` on (a run starting on battery is refused — surfacing only as `LastTaskResult` `0x800710E0`, with no log file written — and unplugging mid-run kills it) and `StartWhenAvailable` off (a slot missed while the machine was off or asleep is never retried). These compound: the machine sleeps through a scheduled slot, nothing catches up, and the next attempt after resume is refused for being on battery — so backups can stop for days while each individual run still looks fine. `install.ps1` now clears all three on both the backup and watchdog tasks (no-ops on a desktop), and `scripts/windows/README.md` documents them with a copy-paste fix for hand-created tasks.
@@ -640,7 +640,7 @@ bash scripts/backup.sh /path/to/your-backup --status    # version, last commit, 
 ```
 
 ```
-Claude Code Backup Script v2.5.0
+Claude Code Backup Script v2.5.1
 ==================================
 ```
 
@@ -662,7 +662,7 @@ Releases are tagged, so you can pin a machine to a known-good version:
 
 ```bash
 cd /path/to/claude-code-backup-guide
-git checkout v2.5.0   # stay on the exact release
+git checkout v2.5.1   # stay on the exact release
 # ... later, when you want to upgrade:
 git checkout main && git pull
 ```
@@ -685,7 +685,7 @@ This tool uses two distinct version numbers, which move independently:
 
 | Version | Where it lives | Bumped when |
 |---------|---------------|-------------|
-| **Script version** (`SCRIPT_VERSION="2.5.0"` in each script, printed in the banner) | `scripts/*.sh` | Every release. Follows [SemVer](https://semver.org): major for breaking changes to invocation or output layout, minor for new features, patch for bug fixes. |
+| **Script version** (`SCRIPT_VERSION="2.5.1"` in each script, printed in the banner) | `scripts/*.sh` | Every release. Follows [SemVer](https://semver.org): major for breaking changes to invocation or output layout, minor for new features, patch for bug fixes. |
 | **Config schema version** (`"version": 1` in `backup-config.json`) | `backup-config.json`, enforced at parse time | Only when the config file format changes in a backwards-incompatible way. Currently `1`. |
 
 If you're reporting an issue, include the script ve
