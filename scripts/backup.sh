@@ -1037,6 +1037,18 @@ main() {
         return 0
     fi
 
+    # Self-heal repos created before init.sh set core.longpaths (see init.sh for the
+    # rationale). Without it a Windows `git add` fails with "Filename too long" and the
+    # whole run aborts, so repair it here rather than failing every night.
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*)
+            if [ "$(git config --get core.longpaths)" != "true" ]; then
+                git config core.longpaths true
+                log_info "Enabled core.longpaths on the backup repo (Windows MAX_PATH workaround)"
+            fi
+            ;;
+    esac
+
     local push_failed=false
 
     # Stage specific backup directories (only dirs that might exist)

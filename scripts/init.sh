@@ -83,6 +83,22 @@ else
     echo -e "${GREEN}[ok]${NC} Git repository already initialized"
 fi
 
+# On Windows, Claude Code's auto-generated project slugs can push a backup path past
+# MAX_PATH (260). A scratch-workspace slug embeds two UUIDs, so
+# projects/<slug>/sessions/<uuid>.jsonl alone is ~225 chars -- over the limit before the
+# repo root is even prepended. Without core.longpaths git fails the whole `git add` with
+# "Filename too long", which backup.sh (correctly) treats as fatal. Set it on the repo so
+# the backup does not depend on the OS-wide LongPathsEnabled policy, which is off by
+# default and needs admin to change.
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*)
+        if [ "$(git -C "$BACKUP_DIR" config --get core.longpaths)" != "true" ]; then
+            git -C "$BACKUP_DIR" config core.longpaths true
+            echo -e "${GREEN}[ok]${NC} Enabled core.longpaths (Windows MAX_PATH workaround)"
+        fi
+        ;;
+esac
+
 # Copy .gitignore from templates if none exists in the backup dir
 if [ ! -f "$BACKUP_DIR/.gitignore" ]; then
     TEMPLATE_GITIGNORE=""
