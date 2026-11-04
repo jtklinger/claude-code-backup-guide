@@ -15,6 +15,7 @@ A config-driven system for backing up and restoring your complete Claude Code en
 - [Sanitized Export for Sharing](#sanitized-export-for-sharing)
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
+- [Restoring to a Different Machine](#restoring-to-a-different-machine)
 - [FAQ](#faq)
 - [Changelog](#changelog)
 - [Upgrading](#upgrading)
@@ -502,6 +503,153 @@ find ~/claude-code-backup/projects/*/sessions/ -name "*.jsonl" -mtime +30 -delet
 diff ~/.claude/settings.json ~/claude-code-backup/global/settings.json
 ```
 
+## Restoring to a Different Machine
+
+Field notes from a real restore (2026-11-03): one machine's backup restored onto a freshly
+installed laptop, which then became a backup member in its own right. The scripts did what
+they say; everything that bit was *around* them. Recorded here so the next restore goes
+faster, and as the to-do list for the next release.
+
+### The sequence that worked
+
+1. **Pre-flight on the new machine.** `gh auth login`, then `gh auth setup-git` so HTTPS
+   pushes work; `git config --global user.name` / `user.email` (a fresh box has none —
+   the first commit fails with "empty ident name"); confirm `jq` and bash 4+. If you are
+   not sure of the backup repo's exact name, `gh repo list <user> | grep backup` — a
+   transposed word costs a confusing "not found".
+2. **Clone the guide and the backup repo side by side.**
+3. **Clone whatever your global `CLAUDE.md` imports first.** If it `@`-imports a file
+   outside `~/.claude` (a shared-config repo, say), `restore.sh` restores the import
+   *line*, not its target. Put the target in place before the restore so the first
+   session after it loads correctly.
+4. **`restore.sh <backup> --dry-run`** and read the CHANGED list. Note whether
+   `~/.claude.json` is in it.
+5. **Interactive restore.** Answer **no** to *MCP config* if the new machine already has a
+   working login — that category overwrites the whole of `~/.claude.json`, not just the
+   server list. Re-add the servers afterwards (by hand, or with your own sync tooling).
+6. **Rewrite the machine-specific parts of the restored `CLAUDE.md`** — host facts,
+   installed tooling, SSH fleet. They describe the *source* machine and every future
+   session on the new one will read them as true.
+7. **Create a new private backup repo for this machine before enabling any schedule.**
+   Point `backup-config.json`, and any timer or task that wraps `backup.sh`, at it. See
+   the first lesson below for why this is step 7 and not step 12.
+8. **First backup by hand**, confirm the push landed, then enable the schedule.
+9. **Delete the `.backup.<timestamp>` copies** the restore left behind (see lesson 4).
+
+### Lessons learned
+
+1. **A restored machine inherits the source machine's backup target.** The restored
+   settings, and any runner script or timer unit you reinstall, still point at the
+   *source* machine's backup repo. `backup.sh` never pulls before pushing, and its
+   top-level directories (`global/`, `skills/`, `plugins/`, `todos/`) are not namespaced
+   per machine, so the new machine's first scheduled run would overwrite the source
+   machine's disaster-recovery copy. This was caught 26 minutes before the first run.
+   One backup repo per machine, created *before* the timer goes live.
+2. **A restore copies the machine layer too.** Host facts in `CLAUDE.md`, per-project
+   memory, session history — all of it describes the source machine. The scripts cannot
+   tell the two layers apart; you have to.
+3. **Auth is the first blocker, not the scripts.** An expired `gh` keyring token and no
+   SSH keys stopped the clone before anything else ran. Nothing in the restore path
+   checks for this up front.
+4. **SAME files still get `.backup.*` copies.** `restore.sh` backs up every existing
+   destination file before writing, even when `cmp` already proved it identical. One
+   restore left 230 such copies under `~/.claude/skills/`, and the next scheduled backup
+   swept them all into the repo.
+5. **The dry run earned its keep.** It was the only thing that made the
+   `~/.claude.json` overwrite visible before it happened. Always run it first on a
+   machine that already has a Claude Code login.
+6. **The restore is not self-contained when `CLAUDE.md` imports from outside
+   `~/.claude`.** The import line comes back; the file it points to does not. A missing
+   import target fails silently at load time.
+7. **The restore summary over-reports.** The verification block lists every `*.md` and
+   `*.json` in the `~/.claude` root — including files the restore never touched — so it
+   is not a record of what was written.
+8. **The toolchain is not in the backup.** Node version, `rg`, `gcloud`, SSH config and
+   keys: none of it comes back, but the restored `CLAUDE.md` and `settings.json` assume
+   it is there.
+9. **MCP servers resolved by bare package name can rot.** One `npx -y <name>` server
+   resolved to a release that no longer ships a Linux binary. Pin versions in anything
+   you intend to restore.
+
+### Cross-OS restores
+
+Everything above assumed the same OS on both ends. A Windows backup restored onto Linux
+or macOS (or the reverse) adds a second class of problem: the scripts copy bytes
+faithfully, and the bytes encode the source OS. From a real Windows-made backup:
+
+| What | In the backup | On the other OS |
+|------|---------------|-----------------|
+| Project slugs | `C--Users-me-projects-foo` | `restore.sh` writes them verbatim. Claude Code on Linux looks for `-home-me-projects-foo`, so memory and sessions are on disk but never loaded. `backup-config.json`'s `projects` list does **not** help — restore ignores it. |
+| `~/.claude.json` | `projects` map keyed by `C:/Users/...`; `mcpServers` wrapped in `cmd /c npx` | Per-project trust for directories that do not exist; MCP definitions that cannot start. A whole-file MCP restore is wrong on arrival. |
+| `settings.json` | `Bash(powershell.exe:*)`, `Bash(ipconfig:*)`, `env.CLAUDE_CODE_PLUGIN_DIRS` with `C:\...` and `;` separators, hooks that call Windows tools | Dead permission entries, a broken plugin-dir path, hooks that fail on every tool call. **Not** platform-agnostic, whatever the FAQ used to say. |
+| `plugins/installed_plugins.json` | `installPath` of `C:\Users\me\.claude\plugins\cache\...` | Plugins re-download their cache, but the registry still points at the old path. |
+| Root scripts | `*.cmd`, `*.ps1` (and `*.sh` the other way) | Restored, inert. |
+| Shell scripts under `skills/` | Git on Windows does not track the execute bit | Come back on Linux without `+x`. |
+| Line endings | Depends on the Windows side's `core.autocrlf` (this backup: none) | Check with `file`; CRLF in a shell script breaks it. |
+| Long paths (Linux → Windows) | Slugs that embed two UUIDs | v2.5.1 fixed `MAX_PATH` for the backup *repo*; the restore *destination* under `~/.claude` can still exceed it. |
+| Session transcripts | `"cwd":"C:\\Users\\..."` inside the `.jsonl` | Harmless — informational once the slug directory is remapped. |
+
+What *is* portable: memory contents, session content (once the slug is renamed), skills,
+plans, commands, agents, output-styles, rules, the preferences half of `CLAUDE.md`, and
+the OS-neutral parts of `settings.json` (deny list, `autoMode` policy, `modelSettings`,
+`enabledPlugins`). That split — portable layer versus machine layer — is what makes
+cross-OS restores tractable; keep the two in separate files if you run more than one OS.
+
+Sequence that works today, with the scripts as they are:
+
+1. Restore **only** skills, the user-content directories, and projects. Answer no to
+   global settings, MCP config, and plugins.
+2. Rename the project slugs you want Claude Code to find. For the workspace root only:
+
+   ```bash
+   cd ~/.claude/projects
+   for d in C--Users-me-projects*; do mv "$d" "${d/C--Users-me-projects/-home-me-projects}"; done
+   ```
+
+   Slugs with no counterpart on the new OS (`AppData`, scratch workspaces) stay as they
+   are; they are inert.
+3. Rebuild `settings.json` by hand from the backup's copy: keep what names a
+   cross-platform tool, drop anything naming an `.exe`, `.cmd`, `.ps1`, a drive letter,
+   or a `;`-separated path list.
+4. Add MCP servers by hand in the native form (`npx` on POSIX, `cmd /c npx` on Windows).
+5. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
+6. `chmod +x` any restored `*.sh` / `*.py` that needs it; check `file` for CRLF.
+
+### Proposed improvements (not yet implemented)
+
+- **`backup.sh`: write a `backup-manifest.json`** (hostname, OS, Claude Code version,
+  script version, timestamp) on every run. `restore.sh` prints it and warns when the
+  hostname differs from the machine it is running on.
+- **`backup-config.json`: optional `"host"` field.** When set, `backup.sh` refuses to run
+  on a machine whose `hostname -s` differs, unless `--force`. Closes lesson 1 at the
+  source instead of relying on someone noticing.
+- **`restore.sh`: skip `backup_existing` when the file is already identical.** No
+  `.backup.*` clutter for SAME files.
+- **`restore.sh`: per-category skip flags** (e.g. `--skip mcp,todos`) so an unattended
+  restore can leave `~/.claude.json` alone without piping prompt answers.
+- **`restore.sh`: MCP merge mode.** Merge the backup's `mcpServers` into the existing
+  `~/.claude.json` instead of replacing the file.
+- **`restore.sh`: list only what it wrote** in the verification summary.
+- **`restore.sh`: after restoring `CLAUDE.md`, resolve its `@`-imports** and report any
+  target that does not exist.
+- **README: a new-machine pre-flight checklist** (auth, git identity, credential helper,
+  shared-config repo) ahead of the Quick Start restore step.
+
+Cross-OS specifically:
+
+- **`restore.sh --remap <from>=<to>`** — rename project slugs on the way in
+  (`C--Users-me-projects=-home-me-projects`), and rewrite the matching `projects` keys if
+  `~/.claude.json` is merged rather than replaced. The single change that makes memory
+  and sessions usable across OSes.
+- **Warn on slug-scheme mismatch.** A backup whose slugs start with `<letter>--` restored
+  on POSIX (or the reverse) should say so before the first prompt.
+- **`settings.json` merge mode with OS filtering** — when restoring to POSIX, drop (and
+  list) entries naming `.exe`/`.cmd`/`.ps1`/drive-letter paths; the reverse for Windows.
+- **Execute bits.** Record the mode of `*.sh`/`*.py` at backup time, or have `restore.sh`
+  set `+x` on restored scripts by extension.
+- **Restore-side long-path check on Windows** — refuse, or warn per file, when a
+  destination path would exceed `MAX_PATH`.
+
 ## FAQ
 
 ### Q: How is v2 different from v1? What's new in v2.1?
@@ -532,7 +680,7 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Q: Will this work across different OS platforms?
 
-**A:** The settings files themselves are platform-agnostic. However, project directory names encode the full path (e.g., `C--Users-me-projects-myproject`), so a backup from Windows will have Windows-style encoded paths. If restoring on macOS/Linux, you may need to update the `projects` list in `backup-config.json` to match the new machine's paths.
+**A:** Partly. Skills, user-content directories, memory and session *content* are portable. Project directory names encode the full source path (e.g., `C--Users-me-projects-myproject`) and `restore.sh` writes them verbatim, so on another OS they must be renamed before Claude Code will load them — editing `backup-config.json`'s `projects` list does not help, restore ignores it. `settings.json`, `~/.claude.json` and the plugin registry carry OS-specific commands and absolute paths and should be rebuilt rather than restored. See [Cross-OS restores](#cross-os-restores).
 
 ### Q: Can I add new projects after initial setup?
 
@@ -540,9 +688,13 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Q: What happens to existing files during restore?
 
-**A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version.
+**A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version. Note that this currently happens even for files the dry run classifies as SAME, so a restore onto a machine that already matches the backup leaves many identical `.backup.*` copies behind — see [Restoring to a Different Machine](#restoring-to-a-different-machine).
 
 ## Changelog
+
+### Unreleased
+
+- **Docs:** new [Restoring to a Different Machine](#restoring-to-a-different-machine) section — the sequence that worked on a real cross-machine restore, nine lessons learned, a [Cross-OS restores](#cross-os-restores) subsection built from inspecting a real Windows-made backup, and the list of script improvements they point to. The cross-platform FAQ answer is corrected: the settings files are not platform-agnostic. No script changes.
 
 ### v2.5.1 (2026-09-22)
 
