@@ -571,6 +571,50 @@ faster, and as the to-do list for the next release.
    resolved to a release that no longer ships a Linux binary. Pin versions in anything
    you intend to restore.
 
+### Cross-OS restores
+
+Everything above assumed the same OS on both ends. A Windows backup restored onto Linux
+or macOS (or the reverse) adds a second class of problem: the scripts copy bytes
+faithfully, and the bytes encode the source OS. From a real Windows-made backup:
+
+| What | In the backup | On the other OS |
+|------|---------------|-----------------|
+| Project slugs | `C--Users-me-projects-foo` | `restore.sh` writes them verbatim. Claude Code on Linux looks for `-home-me-projects-foo`, so memory and sessions are on disk but never loaded. `backup-config.json`'s `projects` list does **not** help — restore ignores it. |
+| `~/.claude.json` | `projects` map keyed by `C:/Users/...`; `mcpServers` wrapped in `cmd /c npx` | Per-project trust for directories that do not exist; MCP definitions that cannot start. A whole-file MCP restore is wrong on arrival. |
+| `settings.json` | `Bash(powershell.exe:*)`, `Bash(ipconfig:*)`, `env.CLAUDE_CODE_PLUGIN_DIRS` with `C:\...` and `;` separators, hooks that call Windows tools | Dead permission entries, a broken plugin-dir path, hooks that fail on every tool call. **Not** platform-agnostic, whatever the FAQ used to say. |
+| `plugins/installed_plugins.json` | `installPath` of `C:\Users\me\.claude\plugins\cache\...` | Plugins re-download their cache, but the registry still points at the old path. |
+| Root scripts | `*.cmd`, `*.ps1` (and `*.sh` the other way) | Restored, inert. |
+| Shell scripts under `skills/` | Git on Windows does not track the execute bit | Come back on Linux without `+x`. |
+| Line endings | Depends on the Windows side's `core.autocrlf` (this backup: none) | Check with `file`; CRLF in a shell script breaks it. |
+| Long paths (Linux → Windows) | Slugs that embed two UUIDs | v2.5.1 fixed `MAX_PATH` for the backup *repo*; the restore *destination* under `~/.claude` can still exceed it. |
+| Session transcripts | `"cwd":"C:\\Users\\..."` inside the `.jsonl` | Harmless — informational once the slug directory is remapped. |
+
+What *is* portable: memory contents, session content (once the slug is renamed), skills,
+plans, commands, agents, output-styles, rules, the preferences half of `CLAUDE.md`, and
+the OS-neutral parts of `settings.json` (deny list, `autoMode` policy, `modelSettings`,
+`enabledPlugins`). That split — portable layer versus machine layer — is what makes
+cross-OS restores tractable; keep the two in separate files if you run more than one OS.
+
+Sequence that works today, with the scripts as they are:
+
+1. Restore **only** skills, the user-content directories, and projects. Answer no to
+   global settings, MCP config, and plugins.
+2. Rename the project slugs you want Claude Code to find. For the workspace root only:
+
+   ```bash
+   cd ~/.claude/projects
+   for d in C--Users-me-projects*; do mv "$d" "${d/C--Users-me-projects/-home-me-projects}"; done
+   ```
+
+   Slugs with no counterpart on the new OS (`AppData`, scratch workspaces) stay as they
+   are; they are inert.
+3. Rebuild `settings.json` by hand from the backup's copy: keep what names a
+   cross-platform tool, drop anything naming an `.exe`, `.cmd`, `.ps1`, a drive letter,
+   or a `;`-separated path list.
+4. Add MCP servers by hand in the native form (`npx` on POSIX, `cmd /c npx` on Windows).
+5. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
+6. `chmod +x` any restored `*.sh` / `*.py` that needs it; check `file` for CRLF.
+
 ### Proposed improvements (not yet implemented)
 
 - **`backup.sh`: write a `backup-manifest.json`** (hostname, OS, Claude Code version,
@@ -590,6 +634,21 @@ faster, and as the to-do list for the next release.
   target that does not exist.
 - **README: a new-machine pre-flight checklist** (auth, git identity, credential helper,
   shared-config repo) ahead of the Quick Start restore step.
+
+Cross-OS specifically:
+
+- **`restore.sh --remap <from>=<to>`** — rename project slugs on the way in
+  (`C--Users-me-projects=-home-me-projects`), and rewrite the matching `projects` keys if
+  `~/.claude.json` is merged rather than replaced. The single change that makes memory
+  and sessions usable across OSes.
+- **Warn on slug-scheme mismatch.** A backup whose slugs start with `<letter>--` restored
+  on POSIX (or the reverse) should say so before the first prompt.
+- **`settings.json` merge mode with OS filtering** — when restoring to POSIX, drop (and
+  list) entries naming `.exe`/`.cmd`/`.ps1`/drive-letter paths; the reverse for Windows.
+- **Execute bits.** Record the mode of `*.sh`/`*.py` at backup time, or have `restore.sh`
+  set `+x` on restored scripts by extension.
+- **Restore-side long-path check on Windows** — refuse, or warn per file, when a
+  destination path would exceed `MAX_PATH`.
 
 ## FAQ
 
@@ -621,7 +680,7 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Q: Will this work across different OS platforms?
 
-**A:** The settings files themselves are platform-agnostic. However, project directory names encode the full path (e.g., `C--Users-me-projects-myproject`), so a backup from Windows will have Windows-style encoded paths. If restoring on macOS/Linux, you may need to update the `projects` list in `backup-config.json` to match the new machine's paths.
+**A:** Partly. Skills, user-content directories, memory and session *content* are portable. Project directory names encode the full source path (e.g., `C--Users-me-projects-myproject`) and `restore.sh` writes them verbatim, so on another OS they must be renamed before Claude Code will load them — editing `backup-config.json`'s `projects` list does not help, restore ignores it. `settings.json`, `~/.claude.json` and the plugin registry carry OS-specific commands and absolute paths and should be rebuilt rather than restored. See [Cross-OS restores](#cross-os-restores).
 
 ### Q: Can I add new projects after initial setup?
 
@@ -635,7 +694,7 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Unreleased
 
-- **Docs:** new [Restoring to a Different Machine](#restoring-to-a-different-machine) section — the sequence that worked on a real cross-machine restore, nine lessons learned, and the list of script improvements they point to. No script changes.
+- **Docs:** new [Restoring to a Different Machine](#restoring-to-a-different-machine) section — the sequence that worked on a real cross-machine restore, nine lessons learned, a [Cross-OS restores](#cross-os-restores) subsection built from inspecting a real Windows-made backup, and the list of script improvements they point to. The cross-platform FAQ answer is corrected: the settings files are not platform-agnostic. No script changes.
 
 ### v2.5.1 (2026-09-22)
 
