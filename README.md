@@ -290,6 +290,8 @@ Usage: bash restore.sh [backup-directory] [--yes] [--dry-run] [--skip <list> | -
 - `--remap <from>=<to>` renames project folders whose name starts with `<from>` so it starts with `<to>` instead, for restoring onto another OS or home path. Repeatable; the first matching rule wins, and folders that match no rule keep their name. `--dry-run` shows each rename as `<old> -> <new>`. See [Cross-OS restores](#cross-os-restores)
 - Warns when a restored `CLAUDE.md` or other global `*.md` file `@`-imports a file that doesn't exist on this machine
 - `--yes` flag skips all prompts and restores everything
+- **MCP config is merged, not replaced.** The backup's MCP servers are added to this machine's `~/.claude.json`; a server on both sides takes the backup's definition but keeps this machine's `env` and `headers`, where tokens live. The login, project trust, and everything else in the file stay as they are. On a machine with no `~/.claude.json`, the new file holds only the servers. `--mcp-replace` takes the backup's whole file instead, login included: for rebuilding the same machine
+- **`settings.json` is merged, not replaced.** Lists such as `permissions.allow` are joined, other settings take the backup's value key by key, and this machine keeps its own `hooks`, `statusLine`, and `model`. When the backup came from another OS, entries that only work there are dropped first and each one is listed (see [Cross-OS restores](#cross-os-restores)). `--settings-replace` copies the backup's file as it is
 - `--dry-run` (aliased `-n`) scans every file and classifies it as **NEW**, **CHANGED**, or **SAME** without writing anything. Implies `--yes`. Use this before a real restore to see exactly which existing files would be overwritten.
 - Session files are restored from `sessions/` subdirectory back to the project root (where Claude Code expects them)
 - Subagent transcripts and tool-result payloads are restored to `projects/<name>/<session-id>/{subagents,tool-results}/` to match Claude Code's on-disk layout
@@ -530,9 +532,9 @@ faster, and as the to-do list for the next release.
    session after it loads correctly.
 4. **`restore.sh <backup> --dry-run`** and read the CHANGED list. Note whether
    `~/.claude.json` is in it.
-5. **Interactive restore.** Answer **no** to *MCP config* if the new machine already has a
-   working login — that category overwrites the whole of `~/.claude.json`, not just the
-   server list. Re-add the servers afterwards (by hand, or with your own sync tooling).
+5. **Interactive restore.** *MCP config* merges the backup's servers into the new
+   machine's `~/.claude.json` and leaves its login alone. Only `--mcp-replace` overwrites
+   the whole file.
 6. **Rewrite the machine-specific parts of the restored `CLAUDE.md`** — host facts,
    installed tooling, SSH fleet. They describe the *source* machine and every future
    session on the new one will read them as true.
@@ -586,8 +588,8 @@ faithfully, and the bytes encode the source OS. From a real Windows-made backup:
 | What | In the backup | On the other OS |
 |------|---------------|-----------------|
 | Project slugs | `C--Users-me-projects-foo` | Restored under the same name unless you pass `--remap`. Claude Code on Linux looks for `-home-me-projects-foo`, so without it memory and sessions are on disk but never loaded. `backup-config.json`'s `projects` list does **not** help — restore ignores it. `restore.sh` warns when it sees this. |
-| `~/.claude.json` | `projects` map keyed by `C:/Users/...`; `mcpServers` wrapped in `cmd /c npx` | Per-project trust for directories that do not exist; MCP definitions that cannot start. A whole-file MCP restore is wrong on arrival. |
-| `settings.json` | `Bash(powershell.exe:*)`, `Bash(ipconfig:*)`, `env.CLAUDE_CODE_PLUGIN_DIRS` with `C:\...` and `;` separators, hooks that call Windows tools | Dead permission entries, a broken plugin-dir path, hooks that fail on every tool call. **Not** platform-agnostic, whatever the FAQ used to say. |
+| `~/.claude.json` | `projects` map keyed by `C:/Users/...`; `mcpServers` wrapped in `cmd /c npx` | Per-project trust for directories that do not exist; MCP definitions that cannot start. A whole-file MCP restore is wrong on arrival, which is why the default is a merge of `mcpServers` only. Servers are not filtered by OS: check `cmd /c` wrappers and Windows paths by hand. |
+| `settings.json` | `Bash(powershell.exe:*)`, `Bash(ipconfig:*)`, `env.CLAUDE_CODE_PLUGIN_DIRS` with `C:\...` and `;` separators, hooks that call Windows tools | Dead permission entries, a broken plugin-dir path, hooks that fail on every tool call. **Not** platform-agnostic, whatever the FAQ used to say. `restore.sh` drops entries naming `.exe`, `.cmd`, `.ps1`, a drive letter, or a `;`-separated path list (or a `/home`, `/Users` path going to Windows) and lists each one. A command without one of those, such as `Bash(ipconfig:*)`, gets through. |
 | `plugins/installed_plugins.json` | `installPath` of `C:\Users\me\.claude\plugins\cache\...` | Plugins re-download their cache, but the registry still points at the old path. |
 | Root scripts | `*.cmd`, `*.ps1` (and `*.sh` the other way) | Restored, inert. |
 | Shell scripts under `skills/` | Git on Windows does not track the execute bit | `restore.sh` sets `+x` on `*.sh`, `*.py`, and `#!` files in `skills/`, `hooks/`, and directly in `~/.claude`. |
@@ -615,12 +617,12 @@ Sequence that works today:
    Slugs with no counterpart on the new OS (`AppData`, scratch workspaces) stay as they
    are; they are inert. If two projects would end up with the same name, the restore
    stops before writing anything.
-2. Rebuild `settings.json` by hand from the backup's copy: keep what names a
-   cross-platform tool, drop anything naming an `.exe`, `.cmd`, `.ps1`, a drive letter,
-   or a `;`-separated path list.
-3. Add MCP servers by hand in the native form (`npx` on POSIX, `cmd /c npx` on Windows).
-4. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
-5. Check restored shell scripts with `file` for CRLF line endings.
+2. Restore `global` and `mcp`. `settings.json` is merged with the Windows-only (or
+   Linux-only) entries dropped; read the `Dropped` lines, since a command that names
+   no `.exe` or path, such as `Bash(ipconfig:*)`, gets through. MCP servers are merged
+   as they are: fix any `cmd /c npx` wrapper to plain `npx`, or the reverse.
+3. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
+4. Check restored shell scripts with `file` for CRLF line endings.
 
 ### Proposed improvements (not yet implemented)
 
@@ -634,18 +636,11 @@ Sequence that works today:
   `.backup.*` clutter for SAME files.
 - **`restore.sh`: per-category skip flags** (e.g. `--skip mcp,todos`) so an unattended
   restore can leave `~/.claude.json` alone without piping prompt answers.
-- **`restore.sh`: MCP merge mode.** Merge the backup's `mcpServers` into the existing
-  `~/.claude.json` instead of replacing the file.
 - **`restore.sh`: list only what it wrote** in the verification summary.
 - **`restore.sh`: after restoring `CLAUDE.md`, resolve its `@`-imports** and report any
   target that does not exist.
 - **README: a new-machine pre-flight checklist** (auth, git identity, credential helper,
   shared-config repo) ahead of the Quick Start restore step.
-
-Cross-OS specifically:
-
-- **`settings.json` merge mode with OS filtering** — when restoring to POSIX, drop (and
-  list) entries naming `.exe`/`.cmd`/`.ps1`/drive-letter paths; the reverse for Windows.
 
 ## FAQ
 
@@ -677,7 +672,7 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Q: Will this work across different OS platforms?
 
-**A:** Partly. Skills, user-content directories, memory and session *content* are portable. Project directory names encode the full source path (e.g., `C--Users-me-projects-myproject`) so on another OS they must be renamed with `restore.sh --remap` before Claude Code will load them — editing `backup-config.json`'s `projects` list does not help, restore ignores it. `settings.json`, `~/.claude.json` and the plugin registry carry OS-specific commands and absolute paths and should be rebuilt rather than restored. See [Cross-OS restores](#cross-os-restores).
+**A:** Partly. Skills, user-content directories, memory and session *content* are portable. Project directory names encode the full source path (e.g., `C--Users-me-projects-myproject`) so on another OS they must be renamed with `restore.sh --remap` before Claude Code will load them — editing `backup-config.json`'s `projects` list does not help, restore ignores it. `settings.json`, `~/.claude.json` and the plugin registry carry OS-specific commands and absolute paths. `restore.sh` merges the first two instead of replacing them and drops `settings.json` entries that only work on the other OS; check the MCP servers and plugin registry by hand. See [Cross-OS restores](#cross-os-restores).
 
 ### Q: Can I add new projects after initial setup?
 

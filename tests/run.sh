@@ -157,7 +157,9 @@ test_round_trip_restores_identical_tree() {
     run_backup
     cp -a "$HOME" "$SANDBOX/seed"
     rm -rf "$HOME" && mkdir -p "$HOME"
-    run_restore
+    # A whole-machine rebuild: the one case for taking ~/.claude.json whole.
+    bash "$RESTORE_SH" "$BACKUP_REPO" --yes --mcp-replace > "$SANDBOX/restore.log" 2>&1 \
+        || fail "restore.sh exited non-zero: $(tail -n 3 "$SANDBOX/restore.log")"
     assert_same_tree "$SANDBOX/seed" "$HOME"
 }
 
@@ -769,6 +771,198 @@ test_long_paths_are_not_flagged_on_linux() {
     make_backup_with_slug "$(slug_for_length 245)"
     restore_as Linux --dry-run || fail "restore.sh exited non-zero"
     assert_no_match "$(strip_color "$SANDBOX/restore.log")" "Windows path limit"
+}
+
+# ─── MCP merge (issue #23) ─────────────────────────────────────────
+
+# edit_json <file> <jq expression>: rewrite a JSON file in place.
+edit_json() {
+    jq "$2" "$1" > "$SANDBOX/edit.json" && mv "$SANDBOX/edit.json" "$1"
+}
+
+# Backup holds myserver (changed) and newserver; this machine has its own login and
+# a server of its own.
+make_mcp_backup() {
+    write_config '.'
+    run_backup
+    edit_json "$BACKUP_REPO/global/claude.json" '
+        .mcpServers.myserver.command = "/new/bin/srv"
+        | .mcpServers.myserver.env = {"API_KEY": "backup-token"}
+        | .mcpServers.newserver = {"type": "http", "url": "https://mcp.example.invalid"}'
+    cat > "$HOME/.claude.json" <<'JSON'
+{"oauthAccount":{"emailAddress":"local-login@example.invalid"},
+ "projects":{"/home/me/proj":{"hasTrustDialogAccepted":true}},
+ "mcpServers":{"myserver":{"command":"/old/bin/srv","env":{"API_KEY":"local-token"}},
+   "localonly":{"command":"local-srv"}}}
+JSON
+}
+
+test_mcp_merge_keeps_login_and_local_env() {
+    make_mcp_backup
+    restore_as Linux --yes --only mcp || fail "restore.sh exited non-zero"
+    local f="$HOME/.claude.json"
+    [ "$(jq -r '.oauthAccount.emailAddress' "$f")" = "local-login@example.invalid" ] || fail "login replaced"
+    [ "$(jq -r '.projects | keys[0]' "$f")" = "/home/me/proj" ] || fail "projects map replaced"
+    [ "$(jq -r '.mcpServers.myserver.command' "$f")" = "/new/bin/srv" ] || fail "server command not taken from backup"
+    [ "$(jq -r '.mcpServers.myserver.env.API_KEY' "$f")" = "local-token" ] || fail "local env replaced"
+    [ "$(jq -r '.mcpServers.newserver.url' "$f")" = "https://mcp.example.invalid" ] || fail "new server not added"
+    [ "$(jq -r '.mcpServers.localonly.command' "$f")" = "local-srv" ] || fail "local-only server removed"
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "Added: newserver"
+    assert_contains "$output" "Updated: myserver"
+    assert_no_match "$output" "overwrites OAuth|re-authenticate"
+    [ "$(count_timestamp_copies)" -eq 1 ] || fail "expected one copy of the old ~/.claude.json"
+}
+
+test_mcp_merge_twice_leaves_file_alone() {
+    make_mcp_backup
+    restore_as Linux --yes --only mcp || fail "restore.sh exited non-zero"
+    restore_as Linux --yes --only mcp || fail "restore.sh exited non-zero"
+    [ "$(count_timestamp_copies)" -eq 1 ] || fail "second merge made another copy"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "1 file\(s\) already identical"
+}
+
+test_mcp_merge_onto_bare_machine_writes_only_servers() {
+    make_mcp_backup
+    rm "$HOME/.claude.json"
+    restore_as Linux --yes --only mcp || fail "restore.sh exited non-zero"
+    [ "$(jq -c 'keys' "$HOME/.claude.json")" = '["mcpServers"]' ] || fail "wrote more than mcpServers: $(jq -c 'keys' "$HOME/.claude.json")"
+    [ "$(jq -r '.mcpServers.myserver.env.API_KEY' "$HOME/.claude.json")" = "backup-token" ] || fail "backup env not used"
+}
+
+test_mcp_replace_restores_whole_file() {
+    make_mcp_backup
+    restore_as Linux --yes --only mcp --mcp-replace || fail "restore.sh exited non-zero"
+    cmp -s "$BACKUP_REPO/global/claude.json" "$HOME/.claude.json" || fail "file not replaced whole"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "overwrites OAuth"
+}
+
+test_mcp_merge_dry_run_reports_and_writes_nothing() {
+    make_mcp_backup
+    cp "$HOME/.claude.json" "$SANDBOX/before.json"
+    restore_as Linux --dry-run --only mcp || fail "restore.sh exited non-zero"
+    cmp -s "$SANDBOX/before.json" "$HOME/.claude.json" || fail "dry run changed ~/.claude.json"
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "CHANGED.*\.claude\.json"
+    assert_contains "$output" "Added: newserver"
+    assert_no_match "$output" "OAuth"
+}
+
+test_mcp_merge_skips_unreadable_local_file() {
+    make_mcp_backup
+    echo '{ not json' > "$HOME/.claude.json"
+    restore_as Linux --yes || fail "restore.sh exited non-zero"
+    [ "$(cat "$HOME/.claude.json")" = '{ not json' ] || fail "unreadable file was changed"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "WARNING.*\.claude\.json.*--mcp-replace"
+    assert_exists "$HOME/.claude/skills/pkg/SKILL.md"
+}
+
+# ─── settings.json merge with OS filtering (issue #29) ─────────────
+
+# Backup made on Windows; settings carry Windows-only entries.
+make_windows_settings_backup() {
+    write_config '.'
+    run_backup
+    edit_json "$BACKUP_REPO/backup-manifest.json" '.os = "MINGW64_NT-10.0-26100"'
+    cat > "$BACKUP_REPO/global/settings.json" <<'JSON'
+{"theme":"dark","model":"backup-model",
+ "permissions":{"allow":["Bash(git status:*)","Bash(powershell.exe:*)","Read(C:\\Users\\me\\notes)"],
+   "deny":["Bash(rm -rf /:*)"]},
+ "env":{"KEEP_ME":"1","CLAUDE_CODE_PLUGIN_DIRS":"C:\\a\\plugins;D:\\b"},
+ "hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"pwsh -File check.ps1"}]},
+   {"matcher":"Edit","hooks":[{"type":"command","command":"echo ok"}]}]},
+ "statusLine":{"type":"command","command":"powershell.exe -File status.ps1"},
+ "mcpServers":{"winsrv":{"command":"npx","args":["-y","srv","C:/Users/me/data"]},"portable":{"command":"npx","args":["-y","srv"]}}}
+JSON
+}
+
+test_settings_merge_unions_permissions_and_keeps_local_choices() {
+    write_config '.'
+    run_backup
+    cat > "$BACKUP_REPO/global/settings.json" <<'JSON'
+{"theme":"dark","model":"backup-model","permissions":{"allow":["Bash(git status:*)","Bash(ls:*)"]},
+ "env":{"SHARED":"backup"},"hooks":{"Stop":[]}}
+JSON
+    cat > "$HOME/.claude/settings.json" <<'JSON'
+{"theme":"light","model":"local-model","localOnly":true,"permissions":{"allow":["Bash(ls:*)","Bash(make:*)"]},
+ "env":{"SHARED":"local","LOCAL":"1"},"statusLine":{"type":"command","command":"local-status"},
+ "hooks":{"PreToolUse":[]}}
+JSON
+    restore_as Linux --yes --only global || fail "restore.sh exited non-zero"
+    local f="$HOME/.claude/settings.json"
+    [ "$(jq -c '.permissions.allow' "$f")" = '["Bash(ls:*)","Bash(make:*)","Bash(git status:*)"]' ] \
+        || fail "allow lists not unioned: $(jq -c '.permissions.allow' "$f")"
+    [ "$(jq -r '.theme' "$f")" = "dark" ] || fail "backup value did not win for theme"
+    [ "$(jq -r '.model' "$f")" = "local-model" ] || fail "local model replaced"
+    [ "$(jq -r '.statusLine.command' "$f")" = "local-status" ] || fail "local statusLine replaced"
+    [ "$(jq -c '.hooks' "$f")" = '{"PreToolUse":[]}' ] || fail "local hooks replaced"
+    [ "$(jq -c '.env' "$f")" = '{"SHARED":"backup","LOCAL":"1"}' ] || fail "env not merged per key"
+    [ "$(jq -r '.localOnly' "$f")" = "true" ] || fail "local-only key removed"
+}
+
+test_settings_from_windows_drops_windows_entries_on_linux() {
+    make_windows_settings_backup
+    rm "$HOME/.claude/settings.json"
+    restore_as Linux --yes --only global || fail "restore.sh exited non-zero"
+    local f="$HOME/.claude/settings.json"
+    [ "$(jq -c '.permissions.allow' "$f")" = '["Bash(git status:*)"]' ] || fail "allow not filtered: $(jq -c '.permissions.allow' "$f")"
+    [ "$(jq -c '.env' "$f")" = '{"KEEP_ME":"1"}' ] || fail "env not filtered: $(jq -c '.env' "$f")"
+    [ "$(jq -c '.hooks.PreToolUse | map(.matcher)' "$f")" = '["Edit"]' ] || fail "hooks not filtered"
+    [ "$(jq -r 'has("statusLine")' "$f")" = "false" ] || fail "Windows statusLine kept"
+    [ "$(jq -r '.theme' "$f")" = "dark" ] || fail "portable setting lost"
+    [ "$(jq -c '.mcpServers | keys' "$f")" = '["portable"]' ] || fail "server with a Windows path not dropped whole: $(jq -c '.mcpServers' "$f")"
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "Dropped .*permissions\.allow.*powershell\.exe"
+    assert_contains "$output" "Dropped .*CLAUDE_CODE_PLUGIN_DIRS"
+    assert_contains "$output" "Dropped .*statusLine"
+    assert_contains "$output" "Dropped .*check\.ps1"
+}
+
+test_settings_same_os_is_not_filtered() {
+    make_windows_settings_backup
+    edit_json "$BACKUP_REPO/backup-manifest.json" '.os = "Linux"'
+    rm "$HOME/.claude/settings.json"
+    restore_as Linux --yes --only global || fail "restore.sh exited non-zero"
+    cmp -s "$BACKUP_REPO/global/settings.json" "$HOME/.claude/settings.json" || fail "same-OS settings were altered"
+    assert_no_match "$(strip_color "$SANDBOX/restore.log")" "Dropped"
+}
+
+test_settings_from_linux_drops_home_paths_on_windows() {
+    write_config '.'
+    run_backup
+    echo '{"permissions":{"allow":["Read(/home/me/notes)","Read(C:/Users/me/x)","Bash(ls:*)"]}}' \
+        > "$BACKUP_REPO/global/settings.json"
+    rm "$HOME/.claude/settings.json"
+    restore_as MINGW64_NT-10.0 --yes --only global || fail "restore.sh exited non-zero"
+    [ "$(jq -c '.permissions.allow' "$HOME/.claude/settings.json")" = '["Read(C:/Users/me/x)","Bash(ls:*)"]' ] \
+        || fail "not filtered for Windows: $(jq -c '.permissions.allow' "$HOME/.claude/settings.json")"
+}
+
+test_settings_os_comes_from_project_names_without_manifest() {
+    make_windows_settings_backup
+    rm "$BACKUP_REPO/backup-manifest.json"
+    mv "$PROJECT_BACKUP" "$BACKUP_REPO/projects/C--Users-me-proj"
+    rm "$HOME/.claude/settings.json"
+    restore_as Linux --yes --only global || fail "restore.sh exited non-zero"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "Dropped .*powershell\.exe"
+}
+
+test_settings_replace_copies_whole_file() {
+    make_windows_settings_backup
+    restore_as Linux --yes --only global --settings-replace || fail "restore.sh exited non-zero"
+    cmp -s "$BACKUP_REPO/global/settings.json" "$HOME/.claude/settings.json" || fail "file not replaced whole"
+    assert_no_match "$(strip_color "$SANDBOX/restore.log")" "Dropped"
+}
+
+test_settings_dry_run_lists_drops_and_writes_nothing() {
+    make_windows_settings_backup
+    cp "$HOME/.claude/settings.json" "$SANDBOX/before.json"
+    restore_as Linux --dry-run --only global || fail "restore.sh exited non-zero"
+    cmp -s "$SANDBOX/before.json" "$HOME/.claude/settings.json" || fail "dry run changed settings.json"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "Dropped .*powershell\.exe"
 }
 
 echo "Running tests"
