@@ -11,6 +11,7 @@
 # interactive prompts.
 #
 # Usage: bash restore.sh [backup-directory] [--yes] [--dry-run] [--skip <list> | --only <list>] [--remap <from>=<to>]...
+#                         [--mcp-replace] [--settings-replace]
 #
 # Options:
 #   --yes        Non-interactive mode (skip all prompts, restore everything)
@@ -27,6 +28,12 @@
 #                with TO instead (e.g. C--Users-me-projects=-home-me-projects).
 #                Repeatable; the first matching rule wins. For restoring onto a
 #                different OS or home path.
+#   --mcp-replace
+#                Replace ~/.claude.json with the backup's copy, login included. By
+#                default only the backup's MCP servers are merged into it.
+#   --settings-replace
+#                Replace settings.json with the backup's copy. By default the two are
+#                merged, and entries that only work on the backup's OS are dropped.
 
 set -e
 
@@ -60,6 +67,12 @@ SELECT_LIST=""       # ",a,b," so a category can be matched with its commas
 REMAP_FROM=()        # --remap rules; same index in both arrays
 REMAP_TO=()
 ON_WINDOWS=false     # set once in main; Git Bash, MSYS, or Cygwin
+THIS_OS=""           # "Windows" or "Linux or macOS"; set in main
+MANIFEST_OS=""       # the backup's OS, same wording, when its manifest says
+FOREIGN_OS=""        # the backup's OS when it differs from this machine's
+MCP_REPLACE=false
+SETTINGS_REPLACE=false
+WORK_DIR=""          # merged files are built here before report_or_copy
 EXEC_FIXED_COUNT=0
 LONG_PATHS=()        # dry run: over the limit; real run: could not be written
 
@@ -238,8 +251,7 @@ slug_os() {
 # Runs before the first prompt: applies the --remap rules on paper, stops if two
 # projects would merge, and warns if the backup came from another kind of OS.
 check_project_slugs() {
-    local this_os="Linux or macOS"
-    [ "$ON_WINDOWS" = "true" ] && this_os="Windows"
+    local this_os="$THIS_OS"
 
     local -A sources=() used=()
     local dir slug target os i total=0 stranded=0 source_os=""
@@ -269,6 +281,14 @@ check_project_slugs() {
             stranded=$((stranded + 1))
         fi
     done
+
+    # The manifest is the better witness: a project folder can be left over from an
+    # earlier restore. Without one, go by the folder names.
+    if [ -n "$MANIFEST_OS" ]; then
+        [ "$MANIFEST_OS" = "$this_os" ] || FOREIGN_OS="$MANIFEST_OS"
+    else
+        FOREIGN_OS="$source_os"
+    fi
 
     for i in "${!REMAP_FROM[@]}"; do
         if [ -z "${used[$i]:-}" ]; then
@@ -319,6 +339,11 @@ show_manifest() {
     this_host=$(uname -n | tr -d '\r' | cut -d. -f1)
     summary=$(jq -r '"\(.os // "unknown OS"), \(.timestamp // "unknown time"), Claude Code \(.claude_code_version // "unknown"), script \(.script_version // "unknown")"' "$manifest" | tr -d '\r')
     log_info "Backup made on $source_host ($summary)"
+
+    case "$(jq -r '.os // ""' "$manifest" | tr -d '\r')" in
+        MINGW*|MSYS*|CYGWIN*) MANIFEST_OS="Windows" ;;
+        Linux*|Darwin*) MANIFEST_OS="Linux or macOS" ;;
+    esac
 
     if [ "$source_host" != "$this_host" ]; then
         log_warn "WARNING: this backup was made on a different machine: $source_host (this machine: $this_host)."
@@ -477,7 +502,8 @@ restore_global_settings() {
     fi
 
     # settings.json
-    if restore_file "$source_dir/settings.json" "$CLAUDE_DIR/settings.json"; then
+    if [ -f "$source_dir/settings.json" ]; then
+        restore_settings_json "$source_dir/settings.json"
         log_detail "  Restored settings.json"
         ((count++)) || true
     fi
@@ -529,21 +555,127 @@ restore_global_settings() {
     log_info "  Global settings: $count file(s) restored"
 }
 
+# settings.json names commands and paths, so on another OS some of it cannot work.
+# Drops, and lists, any entry naming a Windows program or path (restoring to
+# Linux or macOS) or a /home or /Users path (restoring to Windows). An array item
+# goes whole, so a hook group goes with its command. So does anything that runs a
+# program (it has a command or args), such as statusLine or an MCP server: dropping
+# one argument would leave a broken command behind.
+SETTINGS_OS_FILTER='
+def bad: type == "string" and test($re);
+def deepbad: any(..; bad);
+def runsbad: type == "object" and (has("command") or has("args")) and deepbad;
+def clean:
+    if type == "array" then map(select(deepbad | not))
+    elif type == "object" then with_entries(select(.value | (bad or runsbad) | not) | .value |= clean)
+    else . end;
+def drops($p):
+    if type == "array" then
+        to_entries[] | select(.value | deepbad) | "\($p)[\(.key)]: \(.value | tojson)"
+    elif type == "object" then
+        to_entries[] | (if $p == "" then .key else "\($p).\(.key)" end) as $q
+        | if .value | (bad or runsbad) then "\($q): \(.value | tojson)" else .value | drops($q) end
+    else empty end;
+'
+
+# Lists are joined, objects merged key by key with the backup winning, and this
+# machine keeps its own hooks, statusLine, and model.
+SETTINGS_MERGE='
+def merge($a; $b):
+    if ($a | type) == "object" and ($b | type) == "object" then
+        reduce ($b | keys_unsorted[]) as $k ($a;
+            .[$k] = (if $a | has($k) then merge($a[$k]; $b[$k]) else $b[$k] end))
+    elif ($a | type) == "array" and ($b | type) == "array" then $a + ($b - $a)
+    else $b end;
+. as $local | merge($local; $incoming[0])
+| reduce ("hooks", "statusLine", "model") as $k (.; if $local | has($k) then .[$k] = $local[$k] else . end)
+'
+
+restore_settings_json() {
+    local src="$1" dest="$CLAUDE_DIR/settings.json"
+    if [ "$SETTINGS_REPLACE" = "true" ]; then
+        report_or_copy "$src" "$dest"
+        return 0
+    fi
+
+    local incoming="$src" re line
+    if [ -n "$FOREIGN_OS" ]; then
+        if [ "$THIS_OS" = "Windows" ]; then
+            re='(^|[^A-Za-z0-9_.:])/(home|Users)/'
+        else
+            re='\.(exe|cmd|ps1)\b|(^|[^A-Za-z])[A-Za-z]:[\\/]|^[^;\s]*[\\/][^;\s]*(;[^;\s]+)+;?$'
+        fi
+        incoming="$WORK_DIR/settings.filtered.json"
+        jq --arg re "$re" "$SETTINGS_OS_FILTER clean" "$src" > "$incoming"
+        while IFS= read -r line; do
+            log_warn "  Dropped (only works on $FOREIGN_OS) $line"
+        done < <(jq -r --arg re "$re" "$SETTINGS_OS_FILTER drops(\"\")" "$src")
+    fi
+
+    local merged="$incoming"
+    if [ -f "$dest" ] && jq -e 'type == "object"' "$dest" >/dev/null 2>&1; then
+        merged="$WORK_DIR/settings.merged.json"
+        jq --slurpfile incoming "$incoming" "$SETTINGS_MERGE" "$dest" > "$merged"
+        if jq -e --slurpfile m "$merged" '. == $m[0]' "$dest" >/dev/null; then
+            merged="$dest"
+        fi
+    fi
+    report_or_copy "$merged" "$dest"
+}
+
 restore_mcp_config() {
     log_info "Restoring MCP config..."
-    local source_dir="$BACKUP_DIR/global"
+    local src="$BACKUP_DIR/global/claude.json" dest="$HOME/.claude.json"
 
-    if [ ! -f "$source_dir/claude.json" ]; then
+    if [ ! -f "$src" ]; then
         log_warn "  No claude.json found in backup, skipping"
         return 0
     fi
 
     # claude.json lives in HOME, not inside .claude/
-    restore_file "$source_dir/claude.json" "$HOME/.claude.json"
-    log_detail "  Restored ~/.claude.json"
-    log_warn "  WARNING: This overwrites OAuth tokens. You may need to re-authenticate."
+    if [ "$MCP_REPLACE" = "true" ]; then
+        restore_file "$src" "$dest"
+        log_detail "  Replaced ~/.claude.json with the backup's copy"
+        log_warn "  WARNING: This overwrites OAuth tokens. You may need to re-authenticate."
+        return 0
+    fi
 
-    log_info "  MCP config: 1 file restored"
+    # The rest of the file is this machine's: its login, project trust, and IDs.
+    local base="$WORK_DIR/empty.json" merged="$WORK_DIR/claude.json" added updated
+    echo '{}' > "$base"
+    if [ -f "$dest" ]; then
+        if ! jq -e 'type == "object"' "$dest" >/dev/null 2>&1; then
+            log_warn "  WARNING: ~/.claude.json is not readable JSON, so it was left alone. Use --mcp-replace to overwrite it."
+            return 0
+        fi
+        base="$dest"
+    fi
+
+    # A server on both sides takes the backup's definition but keeps this machine's
+    # env and headers, which is where tokens live.
+    jq --slurpfile backup "$src" '
+        (.mcpServers // {}) as $local
+        | .mcpServers = $local + (($backup[0].mcpServers // {}) | with_entries(
+            .key as $k
+            | if $local[$k] then .value += ($local[$k] | with_entries(select(.key == "env" or .key == "headers"))) else . end))
+    ' "$base" > "$merged"
+
+    added=$(jq -r --slurpfile m "$merged" '(.mcpServers // {}) as $l
+        | [$m[0].mcpServers | keys_unsorted[] | select($l[.] == null)] | join(", ")' "$base")
+    updated=$(jq -r --slurpfile m "$merged" '(.mcpServers // {}) as $l
+        | [$m[0].mcpServers | to_entries[] | select($l[.key] != null and $l[.key] != .value) | .key] | join(", ")' "$base")
+    if [ -n "$added" ]; then
+        log_detail "  Added: $added"
+    fi
+    if [ -n "$updated" ]; then
+        log_detail "  Updated: $updated (kept this machine's env and headers)"
+    fi
+
+    if [ -f "$dest" ] && jq -e --slurpfile m "$merged" '. == $m[0]' "$dest" >/dev/null; then
+        merged="$dest"
+    fi
+    report_or_copy "$merged" "$dest"
+    log_info "  MCP servers merged into ~/.claude.json; its login and other settings are kept"
 }
 
 restore_skills() {
@@ -802,6 +934,12 @@ main() {
             --remap=*)
                 add_remap "${1#*=}"
                 ;;
+            --mcp-replace)
+                MCP_REPLACE=true
+                ;;
+            --settings-replace)
+                SETTINGS_REPLACE=true
+                ;;
             *)
                 positional_args+=("$1")
                 ;;
@@ -835,6 +973,11 @@ main() {
     case "$(uname -s)" in
         MINGW*|MSYS*|CYGWIN*) ON_WINDOWS=true ;;
     esac
+    THIS_OS="Linux or macOS"
+    [ "$ON_WINDOWS" = "false" ] || THIS_OS="Windows"
+
+    WORK_DIR=$(mktemp -d)
+    trap 'rm -rf "$WORK_DIR"' EXIT
 
     # Parse config
     parse_config
@@ -957,7 +1100,7 @@ main() {
 
             # Flag claude.json specifically — overwriting nukes OAuth tokens
             for f in "${DRYRUN_CHANGED[@]}"; do
-                if [[ "$f" == *"/.claude.json" ]]; then
+                if [ "$MCP_REPLACE" = "true" ] && [[ "$f" == *"/.claude.json" ]]; then
                     log_warn "NOTE: ~/.claude.json is in the CHANGED set — restoring will replace"
                     log_warn "      OAuth tokens on this machine. You'll need to re-authenticate."
                     echo ""
@@ -1019,7 +1162,7 @@ main() {
     # Check if claude.json was restored
     local claude_json_restored=false
     for f in "${RESTORED_FILES[@]}"; do
-        if [[ "$f" == *".claude.json" ]]; then
+        if [ "$MCP_REPLACE" = "true" ] && [[ "$f" == *".claude.json" ]]; then
             claude_json_restored=true
             break
         fi
