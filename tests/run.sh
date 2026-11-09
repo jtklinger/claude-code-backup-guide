@@ -221,7 +221,8 @@ test_sanitize_removes_secrets_and_keeps_structure() {
 test_sanitize_redacts_standalone_hosts_and_ips() {
     cat > "$HOME/.claude.json" <<'JSON'
 {"mcpServers":{"myserver":{"command":"srv",
-   "args":["--verbose","db.example.com","nas.lab.local:8080","192.168.1.20"]}}}
+   "args":["--verbose","config.json","db.example.com","nas.lab.local:8080","192.168.1.20",
+           "server.lan","db.internal","host.home.arpa","dc1.corp:389"]}}}
 JSON
     write_config '.'
     run_backup
@@ -229,7 +230,7 @@ JSON
         || fail "backup.sh --sanitize exited non-zero: $(tail -n 3 "$SANDBOX/sanitize.log")"
     local args
     args=$(jq -c '.mcpServers.myserver.args' "$SANDBOX/export/global/claude.json")
-    [ "$args" = '["--verbose","<HOSTNAME>","<HOSTNAME>","<HOSTNAME>"]' ] \
+    [ "$args" = '["--verbose","config.json","<HOSTNAME>","<HOSTNAME>","<HOSTNAME>","<HOSTNAME>","<HOSTNAME>","<HOSTNAME>","<HOSTNAME>"]' ] \
         || fail "unexpected sanitized args: $args"
 }
 
