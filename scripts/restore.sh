@@ -108,8 +108,9 @@ parse_config() {
 
     # Read config values (strip \r for Windows compatibility)
     CLAUDE_DIR=$(jq -r '.claude_dir // "~/.claude"' "$config_file" | tr -d '\r')
-    INCLUDE_SESSIONS=$(jq -r '.include_sessions // true' "$config_file" | tr -d '\r')
-    INCLUDE_TODOS=$(jq -r '.include_todos // true' "$config_file" | tr -d '\r')
+    # Not `// true`: jq's // also replaces an explicit false.
+    INCLUDE_SESSIONS=$(jq -r 'if .include_sessions == null then true else .include_sessions end' "$config_file" | tr -d '\r')
+    INCLUDE_TODOS=$(jq -r 'if .include_todos == null then true else .include_todos end' "$config_file" | tr -d '\r')
 
     # Read projects array
     PROJECTS=()
