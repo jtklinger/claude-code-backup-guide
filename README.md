@@ -280,12 +280,14 @@ Usage: bash backup.sh [backup-directory] [--fast] [--status] [--force] [--saniti
 #### restore.sh
 
 ```
-Usage: bash restore.sh [backup-directory] [--yes] [--dry-run]
+Usage: bash restore.sh [backup-directory] [--yes] [--dry-run] [--skip <list> | --only <list>]
 ```
 
 - Reads `backup-config.json` from the backup directory
 - Prompts interactively for each category (global settings, MCP config, skills, plugins, user-content dirs, todos, projects); only prompts for user-content categories that actually have files in the backup
-- Creates timestamped backups of existing files before overwriting (e.g. `settings.json.backup.20260421_142301`)
+- Creates timestamped backups of existing files before overwriting (e.g. `settings.json.backup.20260421_142301`). Files already identical to the backup are left alone, with no copy
+- `--skip <list>` leaves out comma-separated categories; `--only <list>` restores just those. For example, `--yes --skip mcp` on a machine that already has a login. Categories: `global`, `mcp`, `skills`, `plugins`, `plans`, `commands`, `agents`, `output-styles`, `rules`, `hooks`, `scheduled-tasks`, `todos`, `projects`
+- Warns when a restored `CLAUDE.md` or other global `*.md` file `@`-imports a file that doesn't exist on this machine
 - `--yes` flag skips all prompts and restores everything
 - `--dry-run` (aliased `-n`) scans every file and classifies it as **NEW**, **CHANGED**, or **SAME** without writing anything. Implies `--yes`. Use this before a real restore to see exactly which existing files would be overwritten.
 - Session files are restored from `sessions/` subdirectory back to the project root (where Claude Code expects them)
@@ -691,7 +693,7 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Q: What happens to existing files during restore?
 
-**A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version. Note that this currently happens even for files the dry run classifies as SAME, so a restore onto a machine that already matches the backup leaves many identical `.backup.*` copies behind — see [Restoring to a Different Machine](#restoring-to-a-different-machine).
+**A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version.
 
 ## Changelog
 

@@ -10,7 +10,7 @@
 # subagent transcripts and tool-result payloads) with
 # interactive prompts.
 #
-# Usage: bash restore.sh [backup-directory] [--yes] [--dry-run]
+# Usage: bash restore.sh [backup-directory] [--yes] [--dry-run] [--skip <list> | --only <list>]
 #
 # Options:
 #   --yes        Non-interactive mode (skip all prompts, restore everything)
@@ -18,6 +18,10 @@
 #                left alone. Writes nothing. Implies --yes so the full picture
 #                is shown in one pass. Useful before restoring to a laptop
 #                that already has a Claude Code install.
+#   --skip LIST  Leave out these comma-separated categories (e.g. mcp,todos).
+#   --only LIST  Restore only these categories. Categories: global, mcp, skills,
+#                plugins, plans, commands, agents, output-styles, rules, hooks,
+#                scheduled-tasks, todos, projects.
 
 set -e
 
@@ -44,6 +48,10 @@ AUTO_YES=false
 DRY_RUN=false
 RESTORED_FILES=()
 RESTORED_DIRS=()
+IDENTICAL_COUNT=0
+MISSING_IMPORTS=()
+SELECT_MODE=""       # "skip" or "only" when --skip/--only was given
+SELECT_LIST=""       # ",a,b," so a category can be matched with its commas
 
 # Dry-run classification buckets — one array per category
 DRYRUN_NEW=()
@@ -138,8 +146,49 @@ backup_existing() {
     fi
 }
 
+# set_selection <skip|only> <comma-separated categories>
+# Runs during argument parsing, so a typo stops the restore before anything is written.
+set_selection() {
+    local mode="$1" value="$2" item entry
+    if [ -n "$SELECT_MODE" ]; then
+        log_error "Use --skip or --only once, not both or repeatedly."
+        exit 1
+    fi
+    if [ -z "$value" ] || [[ "$value" == --* ]]; then
+        log_error "--$mode requires a comma-separated list of categories."
+        exit 1
+    fi
+
+    local valid=" global mcp skills plugins todos projects "
+    for entry in "${USER_CONTENT_DIRS[@]}"; do
+        valid+="${entry%%:*} "
+    done
+    local -a items
+    IFS=',' read -ra items <<< "$value"
+    for item in "${items[@]}"; do
+        if [[ "$valid" != *" $item "* ]]; then
+            log_error "Unknown category for --$mode: '$item'. Valid categories:$valid"
+            exit 1
+        fi
+    done
+
+    SELECT_MODE="$mode"
+    SELECT_LIST=",$value,"
+}
+
+category_selected() {
+    case "$SELECT_MODE" in
+        skip) [[ "$SELECT_LIST" != *",$1,"* ]] ;;
+        only) [[ "$SELECT_LIST" == *",$1,"* ]] ;;
+        *) return 0 ;;
+    esac
+}
+
+# prompt_restore <category key> <label shown in the prompt>
 prompt_restore() {
-    local category_name="$1"
+    local category_name="$2"
+
+    category_selected "$1" || return 1
 
     if [ "$AUTO_YES" = "true" ]; then
         return 0
@@ -201,6 +250,11 @@ report_or_copy() {
         return 0
     fi
 
+    if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
+        IDENTICAL_COUNT=$((IDENTICAL_COUNT + 1))
+        return 0
+    fi
+
     mkdir -p "$(dirname "$dest")"
     backup_existing "$dest"
     cp "$src" "$dest"
@@ -219,6 +273,38 @@ restore_file() {
 
     report_or_copy "$src" "$dest"
     return 0
+}
+
+# Claude Code skips an @-import whose target is missing without saying so. Read the
+# backup's copies, so this works the same in --dry-run. Only a line that is nothing
+# but an @-path counts; an @name in prose is not an import.
+find_missing_imports() {
+    local source_dir="$1" md_file target resolved
+    for md_file in "$source_dir"/*.md; do
+        [ -f "$md_file" ] || continue
+        while IFS= read -r target; do
+            target="${target#@}"
+            target="${target%%[[:space:]]*}"
+            target="${target/#\~/$HOME}"
+            case "$target" in
+                /*|[A-Za-z]:*) [ -e "$target" ] && continue ;;
+                *)
+                    resolved="$CLAUDE_DIR/$target"
+                    { [ -e "$resolved" ] || [ -e "$source_dir/$target" ]; } && continue
+                    ;;
+            esac
+            MISSING_IMPORTS+=("$(basename "$md_file") imports $target")
+        done < <(grep -E '^@[^[:space:]]*[/.][^[:space:]]*[[:space:]]*$' "$md_file" | tr -d '\r')
+    done
+}
+
+show_missing_imports() {
+    [ "${#MISSING_IMPORTS[@]}" -gt 0 ] || return 0
+    local entry
+    for entry in "${MISSING_IMPORTS[@]}"; do
+        log_warn "WARNING: $entry, which does not exist on this machine. Claude Code will skip that import silently."
+    done
+    echo ""
 }
 
 # ─── Restore Functions ──────────────────────────────────────────────
@@ -286,6 +372,8 @@ restore_global_settings() {
             done
         fi
     done
+
+    find_missing_imports "$source_dir"
 
     log_info "  Global settings: $count file(s) restored"
 }
@@ -542,8 +630,8 @@ restore_projects() {
 main() {
     # Parse arguments
     local positional_args=()
-    for arg in "$@"; do
-        case "$arg" in
+    while [ $# -gt 0 ]; do
+        case "$1" in
             --yes|-y)
                 AUTO_YES=true
                 ;;
@@ -551,10 +639,19 @@ main() {
                 DRY_RUN=true
                 AUTO_YES=true  # No point prompting when nothing will be written
                 ;;
+            --skip|--only)
+                set_selection "${1#--}" "${2:-}"
+                shift
+                ;;
+            --skip=*|--only=*)
+                local option="${1%%=*}"
+                set_selection "${option#--}" "${1#*=}"
+                ;;
             *)
-                positional_args+=("$arg")
+                positional_args+=("$1")
                 ;;
         esac
+        shift
     done
 
     # Determine BACKUP_DIR: first positional arg or parent of script directory
@@ -598,28 +695,28 @@ main() {
     echo ""
 
     # Restore each category with interactive prompts
-    if prompt_restore "Global settings (CLAUDE.md, settings.json, etc.)"; then
+    if prompt_restore global "Global settings (CLAUDE.md, settings.json, etc.)"; then
         restore_global_settings
     else
         log_info "Skipped global settings"
     fi
     echo ""
 
-    if prompt_restore "MCP config (~/.claude.json)"; then
+    if prompt_restore mcp "MCP config (~/.claude.json)"; then
         restore_mcp_config
     else
         log_info "Skipped MCP config"
     fi
     echo ""
 
-    if prompt_restore "Skills"; then
+    if prompt_restore skills "Skills"; then
         restore_skills
     else
         log_info "Skipped skills"
     fi
     echo ""
 
-    if prompt_restore "Plugins"; then
+    if prompt_restore plugins "Plugins"; then
         restore_plugins
     else
         log_info "Skipped plugins"
@@ -638,7 +735,7 @@ main() {
             continue
         fi
 
-        if prompt_restore "$uc_name"; then
+        if prompt_restore "$uc_name" "$uc_name"; then
             restore_user_content "$uc_name" "$uc_glob"
         else
             log_info "Skipped $uc_name"
@@ -647,7 +744,7 @@ main() {
     done
 
     if [ "$INCLUDE_TODOS" = "true" ]; then
-        if prompt_restore "Todos"; then
+        if prompt_restore todos "Todos"; then
             restore_todos
         else
             log_info "Skipped todos"
@@ -665,7 +762,7 @@ main() {
             [ -d "$d" ] && ((backup_project_count++)) || true
         done
     fi
-    if prompt_restore "Projects ($backup_project_count in backup)"; then
+    if prompt_restore projects "Projects ($backup_project_count in backup)"; then
         restore_projects
     else
         log_info "Skipped projects"
@@ -674,6 +771,7 @@ main() {
 
     # ─── Summary ────────────────────────────────────────────────────
     echo ""
+    show_missing_imports
 
     if [ "$DRY_RUN" = "true" ]; then
         echo -e "${GREEN}Dry Run Summary${NC}"
@@ -681,7 +779,7 @@ main() {
         echo ""
         echo -e "  ${GREEN}NEW${NC}      ${#DRYRUN_NEW[@]} file(s) would be created"
         echo -e "  ${YELLOW}CHANGED${NC}  ${#DRYRUN_CHANGED[@]} file(s) would overwrite existing content"
-        echo "  SAME     ${#DRYRUN_SAME[@]} file(s) identical to backup (timestamp-backed-up then re-copied)"
+        echo "  SAME     ${#DRYRUN_SAME[@]} file(s) identical to backup (left alone)"
         echo ""
 
         if [ "${#DRYRUN_CHANGED[@]}" -gt 0 ]; then
@@ -708,45 +806,31 @@ main() {
     echo -e "${GREEN}Restore Verification Summary${NC}"
     echo "=============================="
 
+    echo ""
     if [ ${#RESTORED_FILES[@]} -gt 0 ]; then
-        echo ""
         echo "Restored files (${#RESTORED_FILES[@]} total):"
-        # Show key directories with sizes
-        local shown_dirs=()
-
-        # Show individual files in CLAUDE_DIR root
-        for f in "$CLAUDE_DIR"/*.md "$CLAUDE_DIR"/*.json; do
-            [ -f "$f" ] || continue
-            local size
-            size=$(wc -c < "$f" 2>/dev/null | tr -d ' ')
-            echo "  $f ($size bytes)"
-        done
-
-        # Show restored subdirectories with file counts
-        local summary_dirs=(skills plugins todos projects)
-        for uc_entry in "${USER_CONTENT_DIRS[@]}"; do
-            summary_dirs+=("${uc_entry%%:*}")
-        done
-        for subdir in "${summary_dirs[@]}"; do
-            local full_dir="$CLAUDE_DIR/$subdir"
-            if [ -d "$full_dir" ]; then
-                local file_count
-                file_count=$(find "$full_dir" -type f 2>/dev/null | wc -l | tr -d ' ')
-                local dir_size
-                dir_size=$(du -sh "$full_dir" 2>/dev/null | cut -f1 || echo "unknown")
-                echo "  $full_dir/ ($file_count files, $dir_size)"
+        local -A group_counts=()
+        local restored_file relative group
+        for restored_file in "${RESTORED_FILES[@]}"; do
+            if [ "$restored_file" = "$HOME/.claude.json" ]; then
+                group="~/.claude.json"
+            else
+                relative="${restored_file#"$CLAUDE_DIR"/}"
+                case "$relative" in
+                    */*) group="${relative%%/*}" ;;
+                    *) group="global settings" ;;
+                esac
             fi
+            group_counts[$group]=$(( ${group_counts[$group]:-0} + 1 ))
         done
-
-        # Show ~/.claude.json if it was restored
-        if [ -f "$HOME/.claude.json" ]; then
-            local size
-            size=$(wc -c < "$HOME/.claude.json" 2>/dev/null | tr -d ' ')
-            echo "  $HOME/.claude.json ($size bytes)"
-        fi
+        while IFS= read -r group; do
+            echo "  $group: ${group_counts[$group]} file(s)"
+        done < <(printf '%s\n' "${!group_counts[@]}" | sort)
     else
-        echo ""
         echo "  No files were restored."
+    fi
+    if [ "$IDENTICAL_COUNT" -gt 0 ]; then
+        echo "  $IDENTICAL_COUNT file(s) already identical to the backup (left alone)"
     fi
 
     # ─── Next Steps ─────────────────────────────────────────────────
