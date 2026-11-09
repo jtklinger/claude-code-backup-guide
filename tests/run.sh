@@ -629,6 +629,148 @@ test_remap_warns_when_rule_matches_nothing() {
     assert_contains "$(strip_color "$SANDBOX/restore.log")" "WARNING.*C--Users-typo.*matched no"
 }
 
+# ─── Execute bits (issue #30) ──────────────────────────────────────
+
+# Backs up scripts that have no execute bit, as a Windows-made backup would hold them.
+make_backup_with_scripts() {
+    echo 'echo hi' > "$HOME/.claude/skills/pkg/run.sh"
+    printf '#!/bin/sh\necho hi\n' > "$HOME/.claude/skills/pkg/tool"
+    echo 'plain' > "$HOME/.claude/skills/pkg/notes.txt"
+    echo 'print(1)' > "$HOME/.claude/hooks/check.py"
+    echo 'echo hi' > "$HOME/.claude/helper.sh"
+    echo 'echo hi' > "$HOME/.claude/agents/not-in-scope.sh"
+    write_config '.'
+    run_backup
+    wipe_home
+}
+
+assert_executable() { [ -x "$1" ] || fail "expected executable: ${1#"$SANDBOX"/}"; }
+assert_not_executable() { [ ! -x "$1" ] || fail "expected not executable: ${1#"$SANDBOX"/}"; }
+
+test_restore_marks_scripts_executable() {
+    make_backup_with_scripts
+    restore_as Linux --yes || fail "restore.sh exited non-zero"
+    assert_executable "$HOME/.claude/skills/pkg/run.sh"
+    assert_executable "$HOME/.claude/skills/pkg/tool"
+    assert_executable "$HOME/.claude/hooks/check.py"
+    assert_executable "$HOME/.claude/helper.sh"
+    assert_not_executable "$HOME/.claude/skills/pkg/notes.txt"
+    assert_not_executable "$HOME/.claude/agents/not-in-scope.sh"
+    assert_not_executable "$HOME/.claude/CLAUDE.md"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "4 script\(s\) marked executable"
+}
+
+test_restore_fixes_execute_bit_on_identical_file() {
+    make_backup_with_scripts
+    restore_as Linux --yes || fail "restore.sh exited non-zero"
+    chmod -x "$HOME/.claude/skills/pkg/run.sh"
+    restore_as Linux --yes || fail "restore.sh exited non-zero"
+    assert_executable "$HOME/.claude/skills/pkg/run.sh"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "1 script\(s\) marked executable"
+    [ "$(count_timestamp_copies)" -eq 0 ] || fail "made a copy of an identical file"
+}
+
+test_dry_run_counts_scripts_and_changes_nothing() {
+    make_backup_with_scripts
+    restore_as Linux --yes || fail "restore.sh exited non-zero"
+    chmod -x "$HOME/.claude/skills/pkg/run.sh"
+    restore_as Linux --dry-run || fail "restore.sh exited non-zero"
+    assert_not_executable "$HOME/.claude/skills/pkg/run.sh"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "1 script\(s\) would be marked executable"
+}
+
+test_scripts_already_executable_in_backup_are_not_counted() {
+    make_backup_with_scripts
+    chmod +x "$BACKUP_REPO/skills/pkg/run.sh"
+    restore_as Linux --yes || fail "restore.sh exited non-zero"
+    assert_executable "$HOME/.claude/skills/pkg/run.sh"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "3 script\(s\) marked executable"
+}
+
+test_windows_restore_does_not_touch_execute_bits() {
+    make_backup_with_scripts
+    restore_as MINGW64_NT-10.0 --yes || fail "restore.sh exited non-zero"
+    assert_not_executable "$HOME/.claude/skills/pkg/run.sh"
+    assert_no_match "$(strip_color "$SANDBOX/restore.log")" "marked executable"
+}
+
+# ─── Windows path limits (issue #31) ───────────────────────────────
+
+# Prints a project folder name that makes its restored path exactly <length> long.
+slug_for_length() {
+    local prefix="$HOME/.claude/projects/C--"
+    printf 'C--%*s\n' "$(($1 - ${#prefix}))" '' | tr ' ' x
+}
+
+# Makes cp and mkdir fail the way Windows does past its limits.
+stub_windows_path_limits() {
+    local real_cp real_mkdir
+    real_cp=$(command -v cp)
+    real_mkdir=$(command -v mkdir)
+    mkdir -p "$SANDBOX/bin"
+    cat > "$SANDBOX/bin/cp" <<STUB
+#!/bin/bash
+target="\${@: -1}"
+if [ "\${#target}" -gt 259 ]; then echo "cp: File name too long" >&2; exit 1; fi
+exec "$real_cp" "\$@"
+STUB
+    cat > "$SANDBOX/bin/mkdir" <<STUB
+#!/bin/bash
+target="\${@: -1}"
+if [ "\${#target}" -gt 247 ]; then echo "mkdir: File name too long" >&2; exit 1; fi
+exec "$real_mkdir" "\$@"
+STUB
+    chmod +x "$SANDBOX/bin/cp" "$SANDBOX/bin/mkdir"
+}
+
+test_windows_long_paths_warn_and_restore_continues() {
+    local slug
+    slug=$(slug_for_length 245)
+    make_backup_with_slug "$slug"
+    stub_windows_path_limits
+    restore_as MINGW64_NT-10.0 --yes || fail "restore stopped at an over-long path: $(tail -n 3 "$SANDBOX/restore.log")"
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "WARNING.*too long.*MEMORY.md"
+    assert_contains "$output" "4 file\(s\) could not be restored"
+    assert_no_match "$output" "cp: File name too long"
+    assert_exists "$HOME/.claude/projects/$slug/sess-1.jsonl"
+    assert_missing "$HOME/.claude/projects/$slug/memory/MEMORY.md"
+    assert_exists "$HOME/.claude/skills/pkg/SKILL.md"
+    assert_exists "$HOME/.claude/todos/todo.json"
+}
+
+test_windows_directory_limit_counts_as_too_long() {
+    local slug
+    slug=$(slug_for_length 241)
+    make_backup_with_slug "$slug"
+    stub_windows_path_limits
+    restore_as MINGW64_NT-10.0 --yes || fail "restore stopped at an over-long folder: $(tail -n 3 "$SANDBOX/restore.log")"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "WARNING.*too long.*MEMORY.md"
+}
+
+test_windows_long_path_is_kept_when_copy_succeeds() {
+    local slug
+    slug=$(slug_for_length 245)
+    make_backup_with_slug "$slug"
+    restore_as MINGW64_NT-10.0 --yes || fail "restore.sh exited non-zero"
+    assert_exists "$HOME/.claude/projects/$slug/memory/MEMORY.md"
+    assert_no_match "$(strip_color "$SANDBOX/restore.log")" "too long|could not be restored"
+}
+
+test_windows_dry_run_reports_long_paths_and_writes_nothing() {
+    make_backup_with_slug "$(slug_for_length 245)"
+    restore_as MINGW64_NT-10.0 --dry-run || fail "restore.sh exited non-zero"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "4 file\(s\) .*Windows path limit"
+    assert_missing "$HOME/.claude"
+}
+
+test_long_paths_are_not_flagged_on_linux() {
+    make_backup_with_slug "$(slug_for_length 245)"
+    restore_as Linux --dry-run || fail "restore.sh exited non-zero"
+    assert_no_match "$(strip_color "$SANDBOX/restore.log")" "Windows path limit"
+}
+
 echo "Running tests"
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
     run_test "$t"
