@@ -590,9 +590,9 @@ faithfully, and the bytes encode the source OS. From a real Windows-made backup:
 | `settings.json` | `Bash(powershell.exe:*)`, `Bash(ipconfig:*)`, `env.CLAUDE_CODE_PLUGIN_DIRS` with `C:\...` and `;` separators, hooks that call Windows tools | Dead permission entries, a broken plugin-dir path, hooks that fail on every tool call. **Not** platform-agnostic, whatever the FAQ used to say. |
 | `plugins/installed_plugins.json` | `installPath` of `C:\Users\me\.claude\plugins\cache\...` | Plugins re-download their cache, but the registry still points at the old path. |
 | Root scripts | `*.cmd`, `*.ps1` (and `*.sh` the other way) | Restored, inert. |
-| Shell scripts under `skills/` | Git on Windows does not track the execute bit | Come back on Linux without `+x`. |
+| Shell scripts under `skills/` | Git on Windows does not track the execute bit | `restore.sh` sets `+x` on `*.sh`, `*.py`, and `#!` files in `skills/`, `hooks/`, and directly in `~/.claude`. |
 | Line endings | Depends on the Windows side's `core.autocrlf` (this backup: none) | Check with `file`; CRLF in a shell script breaks it. |
-| Long paths (Linux → Windows) | Slugs that embed two UUIDs | v2.5.1 fixed `MAX_PATH` for the backup *repo*; the restore *destination* under `~/.claude` can still exceed it. |
+| Long paths (Linux → Windows) | Slugs that embed two UUIDs | v2.5.1 fixed `MAX_PATH` for the backup *repo*; the restore *destination* under `~/.claude` can still exceed it. `restore.sh` tries the copy; if Windows refuses, it warns, counts that file, and carries on. `--dry-run` reports the count first. |
 | Session transcripts | `"cwd":"C:\\Users\\..."` inside the `.jsonl` | Harmless — informational once the slug directory is remapped. |
 
 What *is* portable: memory contents, session content (once the slug is renamed), skills,
@@ -620,7 +620,7 @@ Sequence that works today:
    or a `;`-separated path list.
 3. Add MCP servers by hand in the native form (`npx` on POSIX, `cmd /c npx` on Windows).
 4. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
-6. `chmod +x` any restored `*.sh` / `*.py` that needs it; check `file` for CRLF.
+5. Check restored shell scripts with `file` for CRLF line endings.
 
 ### Proposed improvements (not yet implemented)
 
@@ -646,10 +646,6 @@ Cross-OS specifically:
 
 - **`settings.json` merge mode with OS filtering** — when restoring to POSIX, drop (and
   list) entries naming `.exe`/`.cmd`/`.ps1`/drive-letter paths; the reverse for Windows.
-- **Execute bits.** Record the mode of `*.sh`/`*.py` at backup time, or have `restore.sh`
-  set `+x` on restored scripts by extension.
-- **Restore-side long-path check on Windows** — refuse, or warn per file, when a
-  destination path would exceed `MAX_PATH`.
 
 ## FAQ
 

@@ -59,6 +59,9 @@ SELECT_MODE=""       # "skip" or "only" when --skip/--only was given
 SELECT_LIST=""       # ",a,b," so a category can be matched with its commas
 REMAP_FROM=()        # --remap rules; same index in both arrays
 REMAP_TO=()
+ON_WINDOWS=false     # set once in main; Git Bash, MSYS, or Cygwin
+EXEC_FIXED_COUNT=0
+LONG_PATHS=()        # dry run: over the limit; real run: could not be written
 
 # Dry-run classification buckets — one array per category
 DRYRUN_NEW=()
@@ -236,9 +239,7 @@ slug_os() {
 # projects would merge, and warns if the backup came from another kind of OS.
 check_project_slugs() {
     local this_os="Linux or macOS"
-    case "$(uname -s)" in
-        MINGW*|MSYS*|CYGWIN*) this_os="Windows" ;;
-    esac
+    [ "$ON_WINDOWS" = "true" ] && this_os="Windows"
 
     local -A sources=() used=()
     local dir slug target os i total=0 stranded=0 source_os=""
@@ -325,14 +326,53 @@ show_manifest() {
     fi
 }
 
+# Git on Windows does not record the execute bit, so scripts in a Windows-made backup
+# arrive without it. Covers skills, hooks, and files directly in ~/.claude.
+needs_exec_bit() {
+    local src="$1" dest="$2"
+    [ "$ON_WINDOWS" = "false" ] || return 1
+    case "$dest" in
+        "$CLAUDE_DIR/skills/"*|"$CLAUDE_DIR/hooks/"*) ;;
+        *) [ "${dest%/*}" = "$CLAUDE_DIR" ] || return 1 ;;
+    esac
+    [ ! -x "$dest" ] || return 1
+    # A new file takes its mode from the backup copy, so that one may already be right.
+    [ -e "$dest" ] || [ ! -x "$src" ] || return 1
+    case "$dest" in
+        *.sh|*.py) return 0 ;;
+    esac
+    head -c 2 "$src" | grep -q '^#!'
+}
+
+# Windows limits: 259 characters for a file path, 247 for a folder.
+over_windows_path_limit() {
+    local dest="$1" folder="${1%/*}"
+    [ "$ON_WINDOWS" = "true" ] && { [ "${#dest}" -gt 259 ] || [ "${#folder}" -gt 247 ]; }
+}
+
+copy_into_place() {
+    mkdir -p "$(dirname "$2")"
+    backup_existing "$2"
+    cp "$1" "$2"
+}
+
 # Either copy the file (normal mode) or classify the change (dry-run mode).
 # In dry-run mode the file is never written; only classification counters
 # and on-screen NEW/CHANGED lines are emitted.
 report_or_copy() {
     local src="$1"
     local dest="$2"
+    local fix_exec=false
+
+    if needs_exec_bit "$src" "$dest"; then
+        fix_exec=true
+        EXEC_FIXED_COUNT=$((EXEC_FIXED_COUNT + 1))
+    fi
 
     if [ "$DRY_RUN" = "true" ]; then
+        if over_windows_path_limit "$dest"; then
+            LONG_PATHS+=("$dest")
+        fi
         if [ ! -f "$dest" ]; then
             DRYRUN_NEW+=("$dest")
             local src_size
@@ -353,12 +393,22 @@ report_or_copy() {
 
     if [ -f "$dest" ] && cmp -s "$src" "$dest"; then
         IDENTICAL_COUNT=$((IDENTICAL_COUNT + 1))
+        [ "$fix_exec" = "false" ] || chmod +x "$dest"
         return 0
     fi
 
-    mkdir -p "$(dirname "$dest")"
-    backup_existing "$dest"
-    cp "$src" "$dest"
+    # Some Windows tools get past the limit, so try the copy. A failure costs this one
+    # file, which stays in the backup, rather than stopping the whole restore.
+    if over_windows_path_limit "$dest"; then
+        if ! copy_into_place "$src" "$dest" 2>/dev/null; then
+            log_warn "  WARNING: path too long for Windows, not restored: $dest"
+            LONG_PATHS+=("$dest")
+            return 0
+        fi
+    else
+        copy_into_place "$src" "$dest"
+    fi
+    [ "$fix_exec" = "false" ] || chmod +x "$dest"
     RESTORED_FILES+=("$dest")
     return 0
 }
@@ -552,9 +602,6 @@ restore_plugins() {
         while IFS= read -r -d '' src_file; do
             local rel_path="${src_file#"$data_src"/}"
             local dest_file="$data_dest/$rel_path"
-            if [ "$DRY_RUN" != "true" ]; then
-                mkdir -p "$(dirname "$dest_file")"
-            fi
             if restore_file "$src_file" "$dest_file"; then
                 ((count++)) || true
             fi
@@ -590,9 +637,6 @@ restore_user_content() {
     while IFS= read -r -d '' src_file; do
         local rel_path="${src_file#"$source_dir"/}"
         local dest_file="$dest_dir/$rel_path"
-        if [ "$DRY_RUN" != "true" ]; then
-            mkdir -p "$(dirname "$dest_file")"
-        fi
         if restore_file "$src_file" "$dest_file"; then
             ((count++)) || true
         fi
@@ -707,9 +751,6 @@ restore_projects() {
                 local uuid
                 uuid=$(basename "$uuid_dir")
                 local dest_cat="$dest_base/$uuid/$category"
-                if [ "$DRY_RUN" != "true" ]; then
-                    mkdir -p "$dest_cat"
-                fi
 
                 while IFS= read -r -d '' src_file; do
                     local basename
@@ -790,6 +831,10 @@ main() {
         log_info "Non-interactive mode (--yes): all categories will be restored"
         echo ""
     fi
+
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) ON_WINDOWS=true ;;
+    esac
 
     # Parse config
     parse_config
@@ -895,7 +940,15 @@ main() {
         echo -e "  ${GREEN}NEW${NC}      ${#DRYRUN_NEW[@]} file(s) would be created"
         echo -e "  ${YELLOW}CHANGED${NC}  ${#DRYRUN_CHANGED[@]} file(s) would overwrite existing content"
         echo "  SAME     ${#DRYRUN_SAME[@]} file(s) identical to backup (left alone)"
+        if [ "$EXEC_FIXED_COUNT" -gt 0 ]; then
+            echo "  $EXEC_FIXED_COUNT script(s) would be marked executable"
+        fi
         echo ""
+
+        if [ "${#LONG_PATHS[@]}" -gt 0 ]; then
+            log_warn "${#LONG_PATHS[@]} file(s) are over the Windows path limit and may not restore."
+            echo ""
+        fi
 
         if [ "${#DRYRUN_CHANGED[@]}" -gt 0 ]; then
             log_warn "${#DRYRUN_CHANGED[@]} existing file(s) would be overwritten."
@@ -946,6 +999,13 @@ main() {
     fi
     if [ "$IDENTICAL_COUNT" -gt 0 ]; then
         echo "  $IDENTICAL_COUNT file(s) already identical to the backup (left alone)"
+    fi
+    if [ "$EXEC_FIXED_COUNT" -gt 0 ]; then
+        echo "  $EXEC_FIXED_COUNT script(s) marked executable"
+    fi
+    if [ "${#LONG_PATHS[@]}" -gt 0 ]; then
+        log_warn "${#LONG_PATHS[@]} file(s) could not be restored because their paths are too long for Windows."
+        log_warn "They are still in the backup at $BACKUP_DIR."
     fi
 
     # ─── Next Steps ─────────────────────────────────────────────────
