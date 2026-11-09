@@ -218,6 +218,21 @@ test_sanitize_removes_secrets_and_keeps_structure() {
         || fail "env value was not redacted"
 }
 
+test_sanitize_redacts_standalone_hosts_and_ips() {
+    cat > "$HOME/.claude.json" <<'JSON'
+{"mcpServers":{"myserver":{"command":"srv",
+   "args":["--verbose","db.example.com","nas.lab.local:8080","192.168.1.20"]}}}
+JSON
+    write_config '.'
+    run_backup
+    bash "$BACKUP_SH" "$BACKUP_REPO" --sanitize "$SANDBOX/export" > "$SANDBOX/sanitize.log" 2>&1 \
+        || fail "backup.sh --sanitize exited non-zero: $(tail -n 3 "$SANDBOX/sanitize.log")"
+    local args
+    args=$(jq -c '.mcpServers.myserver.args' "$SANDBOX/export/global/claude.json")
+    [ "$args" = '["--verbose","<HOSTNAME>","<HOSTNAME>","<HOSTNAME>"]' ] \
+        || fail "unexpected sanitized args: $args"
+}
+
 echo "Running tests"
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
     run_test "$t"
