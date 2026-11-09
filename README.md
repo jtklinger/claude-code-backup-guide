@@ -168,7 +168,7 @@ The config file lives in the root of your backup repository. It controls what ge
 |-------|------|-------------|
 | `version` | number | Config format version (must be `1`) |
 | `claude_dir` | string | Path to Claude Code data directory (`~` is expanded) |
-| `include_sessions` | boolean | Whether to back up `.jsonl` session transcripts per project |
+| `include_sessions` | boolean | Whether to back up session data per project: `.jsonl` transcripts, subagent transcripts, and tool results. Turning it off stops new copies but leaves anything already in the backup |
 | `include_todos` | boolean | Whether to back up per-session todo state |
 | `projects` | string[] | Patterns matched against directory names in `~/.claude/projects/` (see below) |
 | `git_auto_push` | boolean | Push to remote after each backup commit |
