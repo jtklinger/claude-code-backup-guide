@@ -167,6 +167,7 @@ The config file lives in the root of your backup repository. It controls what ge
 | Field | Type | Description |
 |-------|------|-------------|
 | `version` | number | Config format version (must be `1`) |
+| `host` | string | Optional. The short hostname this backup repo belongs to; `backup.sh` refuses to run anywhere else unless `--force` is passed. `init.sh` sets it to the current machine |
 | `claude_dir` | string | Path to Claude Code data directory (`~` is expanded) |
 | `include_sessions` | boolean | Whether to back up session data per project: `.jsonl` transcripts, subagent transcripts, and tool results. Turning it off stops new copies but leaves anything already in the backup |
 | `include_todos` | boolean | Whether to back up per-session todo state |
@@ -260,7 +261,7 @@ Usage: bash init.sh [backup-directory]
 #### backup.sh
 
 ```
-Usage: bash backup.sh [backup-directory] [--fast] [--status] [--sanitize <output-directory>]
+Usage: bash backup.sh [backup-directory] [--fast] [--status] [--force] [--sanitize <output-directory>]
 ```
 
 - Reads `backup-config.json` from the backup directory
@@ -273,6 +274,8 @@ Usage: bash backup.sh [backup-directory] [--fast] [--status] [--sanitize <output
 - `--sanitize <output-directory>` produces a credential-free export in the given directory (see [Sanitized Export](#sanitized-export-for-sharing))
 - `--fast` detects changes by **size + modified-time** instead of reading every byte — much faster over a large, mostly-unchanged corpus (session transcripts). Opt-in; the default stays byte-exact. Trade-off: a content change that preserves *both* size and mtime isn't detected (safe for Claude's append-only session/todo files). The first `--fast` run re-copies once to stamp preserved mtimes, then subsequent runs are fast.
 - `--status` prints a health readout (last commit, total commits, remote sync, working-tree + `.git` size) for the backup directory and exits without backing up
+- `--force` runs even when the config's `host` names a different machine
+- Writes `backup-manifest.json` (hostname, OS, Claude Code version, script version, timestamp) to the repo root. `restore.sh` prints it and warns when the backup came from a different machine
 
 #### restore.sh
 

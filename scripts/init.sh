@@ -246,6 +246,7 @@ done
 # Write the config file
 printf '%s\n' "{
   \"version\": 1,
+  \"host\": \"$(uname -n | tr -d '\r' | cut -d. -f1)\",
   \"claude_dir\": \"~/.claude\",
   \"include_sessions\": true,
   \"include_todos\": true,
