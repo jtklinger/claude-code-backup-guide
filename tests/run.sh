@@ -57,7 +57,7 @@ JSON
 strip_color() { sed 's/\x1b\[[0-9;]*m//g' "$1"; }
 
 assert_contains() {
-    grep -qE "$2" <<< "$1" || fail "expected output matching: $2"
+    grep -qE -- "$2" <<< "$1" || fail "expected output matching: $2"
 }
 
 assert_same_tree() {
@@ -503,6 +503,130 @@ test_dry_run_warns_about_missing_imports() {
     bash "$RESTORE_SH" "$BACKUP_REPO" --dry-run > "$SANDBOX/dry.log" 2>&1 \
         || fail "restore.sh --dry-run exited non-zero"
     assert_import_warnings "$(strip_color "$SANDBOX/dry.log")"
+}
+
+# restore_as <uname -s value> <restore.sh args...>: pretend to be another OS.
+restore_as() {
+    local os="$1" real_uname
+    shift
+    real_uname=$(command -v uname)
+    mkdir -p "$SANDBOX/bin"
+    cat > "$SANDBOX/bin/uname" <<STUB
+#!/bin/bash
+if [ "\$1" = "-s" ]; then echo "$os"; else exec "$real_uname" "\$@"; fi
+STUB
+    chmod +x "$SANDBOX/bin/uname"
+    PATH="$SANDBOX/bin:$PATH" bash "$RESTORE_SH" "$BACKUP_REPO" "$@" > "$SANDBOX/restore.log" 2>&1
+}
+
+# Backs up the seeded project, then renames it in the backup as if made elsewhere.
+make_backup_with_slug() {
+    write_config '.'
+    run_backup
+    [ "$PROJECT_BACKUP" = "$BACKUP_REPO/projects/$1" ] || mv "$PROJECT_BACKUP" "$BACKUP_REPO/projects/$1"
+    wipe_home
+}
+
+assert_no_match() {
+    if grep -qE -- "$2" <<< "$1"; then
+        fail "did not expect output matching: $2"
+    fi
+}
+
+test_restore_warns_about_windows_backup_on_linux() {
+    make_backup_with_slug "C--Users-me-proj"
+    restore_as Linux --yes || fail "restore.sh exited non-zero"
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "WARNING.*made on Windows"
+    assert_contains "$output" "1 of 1 project"
+    assert_contains "$output" "--remap"
+    assert_exists "$HOME/.claude/projects/C--Users-me-proj/memory/MEMORY.md"
+}
+
+test_restore_warns_about_linux_backup_on_windows() {
+    make_backup_with_slug "-home-me-proj"
+    restore_as MINGW64_NT-10.0 --yes || fail "restore.sh exited non-zero"
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "WARNING.*made on Linux or macOS"
+    assert_contains "$output" "1 of 1 project"
+}
+
+test_restore_has_no_os_warning_on_same_os() {
+    make_backup_with_slug "-home-me-proj"
+    restore_as Linux --yes || fail "restore.sh exited non-zero"
+    assert_no_match "$(strip_color "$SANDBOX/restore.log")" "WARNING.*made on"
+}
+
+test_remap_renames_matching_projects_only() {
+    make_backup_with_slug "C--Users-me-proj"
+    cp -r "$BACKUP_REPO/projects/C--Users-me-proj" "$BACKUP_REPO/projects/D--work-app"
+    cp -r "$BACKUP_REPO/projects/C--Users-me-proj" "$BACKUP_REPO/projects/-opt-other"
+    restore_as Linux --yes --remap C--Users-me=-home-me --remap=D--work=-srv \
+        || fail "restore.sh exited non-zero"
+    local projects="$HOME/.claude/projects"
+    assert_exists "$projects/-home-me-proj/memory/MEMORY.md"
+    assert_exists "$projects/-home-me-proj/sess-1.jsonl"
+    assert_exists "$projects/-home-me-proj/sess-1/subagents/agent.jsonl"
+    assert_exists "$projects/-srv-app/memory/MEMORY.md"
+    assert_exists "$projects/-opt-other/memory/MEMORY.md"
+    assert_missing "$projects/C--Users-me-proj"
+    assert_missing "$projects/D--work-app"
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "WARNING.*made on Windows"
+    assert_no_match "$output" "of 3 project"
+}
+
+test_remap_first_matching_rule_wins() {
+    make_backup_with_slug "C--Users-me-proj"
+    restore_as Linux --yes --remap C--Users=-first --remap C--Users-me=-second \
+        || fail "restore.sh exited non-zero"
+    assert_exists "$HOME/.claude/projects/-first-me-proj"
+    assert_missing "$HOME/.claude/projects/-second-proj"
+}
+
+test_remap_dry_run_shows_rename_and_writes_nothing() {
+    make_backup_with_slug "C--Users-me-proj"
+    restore_as Linux --dry-run --remap C--Users-me=-home-me \
+        || fail "restore.sh exited non-zero"
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "C--Users-me-proj -> -home-me-proj"
+    assert_contains "$output" "NEW.*/projects/-home-me-proj/memory/MEMORY\.md"
+    assert_missing "$HOME/.claude/projects"
+}
+
+test_remap_rejects_bad_values() {
+    make_backup_with_slug "C--Users-me-proj"
+    local value
+    for value in "no-equals" "=to" "from=" "C:/Users/me=/home/me" "from=.." 'a\b=c'; do
+        if restore_as Linux --yes --remap "$value"; then
+            fail "accepted bad value: $value"
+        fi
+    done
+    if restore_as Linux --yes --remap; then
+        fail "accepted --remap with no value"
+    fi
+    assert_missing "$HOME/.claude"
+}
+
+test_remap_collision_stops_before_writing() {
+    make_backup_with_slug "C--Users-me-proj"
+    cp -r "$BACKUP_REPO/projects/C--Users-me-proj" "$BACKUP_REPO/projects/-home-me-proj"
+    if restore_as Linux --yes --remap C--Users-me=-home-me; then
+        fail "restore continued despite two projects sharing a destination"
+    fi
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "-home-me-proj"
+    assert_missing "$HOME/.claude"
+}
+
+test_remap_warns_when_rule_matches_nothing() {
+    make_backup_with_slug "C--Users-me-proj"
+    restore_as Linux --yes --remap C--Users-typo=-home-me \
+        || fail "restore.sh exited non-zero"
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "WARNING.*C--Users-typo.*matched no"
 }
 
 echo "Running tests"
