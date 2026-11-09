@@ -37,7 +37,7 @@ User-content directories are driven by a shared `USER_CONTENT_DIRS` array in `ba
 
 ## Testing Changes
 
-No unit test suite (CI runs `bash -n` + linters via `.github/workflows/lint.yml`). To validate behavior locally:
+Run `bash tests/run.sh` before every commit; it uses a throwaway `HOME`, so the real `~/.claude` is untouched. CI runs it on Ubuntu along with `bash -n` + linters via `.github/workflows/lint.yml`. To validate behavior by hand:
 
 ```bash
 # First-time setup (creates config + .gitignore)
