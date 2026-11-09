@@ -9,7 +9,7 @@
 # scheduled-tasks), todos, and per-project data including
 # subagent transcripts and tool-result payloads.
 #
-# Usage: bash backup.sh [backup-directory] [--fast] [--status] [--sanitize <output-directory>]
+# Usage: bash backup.sh [backup-directory] [--fast] [--status] [--force] [--sanitize <output-directory>]
 #
 #   --fast   Detect changes by size + mtime instead of a full byte compare.
 #            Much faster over large, mostly-unchanged data (session transcripts).
@@ -42,6 +42,7 @@ NC='\033[0m'
 # Global state
 FAST_COMPARE=false   # --fast: size+mtime change detection instead of byte-exact cmp
 STATUS_MODE=false    # --status: print a health readout and exit
+FORCE_HOST=false     # --force: run even if the config's "host" is another machine
 COUNTS_GLOBAL=0
 COUNTS_MCP=0
 COUNTS_SKILLS=0
@@ -82,6 +83,54 @@ log_error() {
 }
 
 # ─── Helper Functions ───────────────────────────────────────────────
+
+short_hostname() {
+    uname -n | tr -d '\r' | cut -d. -f1
+}
+
+# A restored config still points at the original machine's backup repo. Stop here,
+# before anything is copied, so this machine cannot overwrite that backup.
+check_host() {
+    local expected current
+    expected=$(jq -r '.host // empty' "$BACKUP_DIR/backup-config.json" | tr -d '\r')
+    current=$(short_hostname)
+    [ -n "$expected" ] && [ "$expected" != "$current" ] || return 0
+
+    if [ "$FORCE_HOST" = "true" ]; then
+        log_warn "Config is for host '$expected', running on '$current' (--force)"
+        return 0
+    fi
+    log_error "This backup repo belongs to host '$expected', but this machine is '$current'."
+    log_error "Nothing was changed. Use this machine's own backup repo, or pass --force to override."
+    exit 1
+}
+
+# Records which machine made the backup. Left alone when only the timestamp would
+# change, so a run with no real changes still makes no commit.
+write_manifest() {
+    local manifest="$BACKUP_DIR/backup-manifest.json"
+    local hostname os claude_code_version script_version timestamp fresh
+    hostname=$(short_hostname)
+    os=$(uname -s)
+    claude_code_version=$(claude --version 2>/dev/null | head -n 1 | tr -d '\r')
+    script_version="$SCRIPT_VERSION"
+    timestamp=$(date -u '+%Y-%m-%dT%H:%M:%SZ')
+    fresh=$(jq -n --arg hostname "$hostname" --arg os "$os" \
+        --arg claude_code_version "${claude_code_version:-unknown}" \
+        --arg script_version "$script_version" --arg timestamp "$timestamp" \
+        '{$hostname, $os, $claude_code_version, $script_version, $timestamp}')
+
+    if git diff --cached --quiet 2>/dev/null && [ -f "$manifest" ] \
+        && [ "$(jq -c 'del(.timestamp)' "$manifest")" = "$(jq -c 'del(.timestamp)' <<< "$fresh")" ]; then
+        return 0
+    fi
+
+    printf '%s\n' "$fresh" > "$manifest"
+    if ! git add "$manifest"; then
+        log_error "git add failed for 'backup-manifest.json' -- a stale .git/index.lock or repo corruption can cause this; aborting"
+        exit 1
+    fi
+}
 
 parse_config() {
     local config_file="$BACKUP_DIR/backup-config.json"
@@ -973,6 +1022,10 @@ main() {
                 STATUS_MODE=true
                 shift
                 ;;
+            --force)
+                FORCE_HOST=true
+                shift
+                ;;
             *)
                 positional_args+=("$1")
                 shift
@@ -999,6 +1052,7 @@ main() {
 
     # Parse config
     parse_config
+    check_host
 
     if [ "$FAST_COMPARE" = "true" ]; then
         log_info "Change detection: fast (size + mtime)"
@@ -1077,6 +1131,8 @@ main() {
             fi
         fi
     done
+
+    write_manifest
 
     # Check if there are staged changes
     if git diff --cached --quiet 2>/dev/null; then

@@ -157,6 +157,24 @@ prompt_restore() {
     esac
 }
 
+# Says where the backup came from, and warns if that was another machine.
+# Backups made before the manifest existed have none, so it is optional.
+show_manifest() {
+    local manifest="$BACKUP_DIR/backup-manifest.json"
+    [ -f "$manifest" ] || return 0
+
+    local source_host this_host summary
+    source_host=$(jq -r '.hostname // "unknown"' "$manifest" | tr -d '\r')
+    this_host=$(uname -n | tr -d '\r' | cut -d. -f1)
+    summary=$(jq -r '"\(.os // "unknown OS"), \(.timestamp // "unknown time"), Claude Code \(.claude_code_version // "unknown"), script \(.script_version // "unknown")"' "$manifest" | tr -d '\r')
+    log_info "Backup made on $source_host ($summary)"
+
+    if [ "$source_host" != "$this_host" ]; then
+        log_warn "WARNING: this backup was made on a different machine: $source_host (this machine: $this_host)."
+        log_warn "It carries that machine's CLAUDE.md host facts, memory, and sessions."
+    fi
+}
+
 # Either copy the file (normal mode) or classify the change (dry-run mode).
 # In dry-run mode the file is never written; only classification counters
 # and on-screen NEW/CHANGED lines are emitted.
@@ -564,6 +582,7 @@ main() {
 
     # Parse config
     parse_config
+    show_manifest
 
     # Create claude dir if missing (skip in dry-run — we're not writing anything)
     if [ ! -d "$CLAUDE_DIR" ]; then

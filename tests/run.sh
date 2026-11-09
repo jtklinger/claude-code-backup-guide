@@ -234,6 +234,125 @@ JSON
         || fail "unexpected sanitized args: $args"
 }
 
+# ─── Host guard (issue #20) and manifest (issue #19) ───────────────
+
+this_host() { uname -n | tr -d '\r' | cut -d. -f1; }
+
+test_host_mismatch_refuses_before_touching_repo() {
+    write_config '.host = "some-other-machine"'
+    if bash "$BACKUP_SH" "$BACKUP_REPO" > "$SANDBOX/backup.log" 2>&1; then
+        fail "backup.sh should have exited non-zero"
+    fi
+    assert_contains "$(strip_color "$SANDBOX/backup.log")" "some-other-machine"
+    assert_missing "$BACKUP_REPO/global"
+    assert_missing "$BACKUP_REPO/backup-manifest.json"
+}
+
+test_host_match_runs() {
+    write_config ".host = \"$(this_host)\""
+    run_backup
+    assert_exists "$BACKUP_REPO/global/CLAUDE.md"
+}
+
+test_force_overrides_host_mismatch() {
+    write_config '.host = "some-other-machine"'
+    bash "$BACKUP_SH" "$BACKUP_REPO" --force > "$SANDBOX/backup.log" 2>&1 \
+        || fail "backup.sh --force exited non-zero: $(tail -n 3 "$SANDBOX/backup.log")"
+    assert_exists "$BACKUP_REPO/global/CLAUDE.md"
+}
+
+test_init_records_current_host() {
+    yes '' | bash "$REPO_ROOT/scripts/init.sh" "$BACKUP_REPO" > "$SANDBOX/init.log" 2>&1 \
+        || fail "init.sh exited non-zero: $(tail -n 3 "$SANDBOX/init.log")"
+    [ "$(jq -r '.host' "$BACKUP_REPO/backup-config.json")" = "$(this_host)" ] \
+        || fail "init.sh did not record this host"
+}
+
+test_manifest_is_committed_with_expected_fields() {
+    write_config '.'
+    run_backup
+    git -C "$BACKUP_REPO" ls-files --error-unmatch backup-manifest.json > /dev/null 2>&1 \
+        || fail "backup-manifest.json is not committed"
+    [ "$(jq -r '.hostname' "$BACKUP_REPO/backup-manifest.json")" = "$(this_host)" ] \
+        || fail "manifest hostname is wrong"
+    [ "$(jq -r '.os' "$BACKUP_REPO/backup-manifest.json")" = "$(uname -s)" ] \
+        || fail "manifest os is wrong"
+    jq -e '.claude_code_version and .script_version and .timestamp' "$BACKUP_REPO/backup-manifest.json" > /dev/null \
+        || fail "manifest is missing fields"
+}
+
+test_manifest_timestamp_updates_when_data_changes() {
+    write_config '.'
+    run_backup
+    jq '.timestamp = "old"' "$BACKUP_REPO/backup-manifest.json" > "$SANDBOX/m" && cp "$SANDBOX/m" "$BACKUP_REPO/backup-manifest.json"
+    echo 'changed' >> "$HOME/.claude/CLAUDE.md"
+    run_backup
+    [ "$(jq -r '.timestamp' "$BACKUP_REPO/backup-manifest.json")" != "old" ] \
+        || fail "manifest was not refreshed"
+}
+
+test_manifest_left_alone_when_nothing_changed() {
+    write_config '.'
+    run_backup
+    jq '.timestamp = "old"' "$BACKUP_REPO/backup-manifest.json" > "$SANDBOX/m" && cp "$SANDBOX/m" "$BACKUP_REPO/backup-manifest.json"
+    git -C "$BACKUP_REPO" add backup-manifest.json
+    git -C "$BACKUP_REPO" commit -q -m 'age manifest'
+    local before
+    before=$(commit_count)
+    run_backup
+    [ "$(jq -r '.timestamp' "$BACKUP_REPO/backup-manifest.json")" = "old" ] \
+        || fail "manifest was rewritten with no data change"
+    [ "$(commit_count)" = "$before" ] || fail "a run with no changes created a commit"
+}
+
+test_sanitized_export_has_no_manifest() {
+    write_config '.'
+    run_backup
+    bash "$BACKUP_SH" "$BACKUP_REPO" --sanitize "$SANDBOX/export" > "$SANDBOX/sanitize.log" 2>&1 \
+        || fail "backup.sh --sanitize exited non-zero"
+    assert_missing "$SANDBOX/export/backup-manifest.json"
+}
+
+# Backs up, then rewrites the manifest as if another machine had made it.
+make_foreign_backup() {
+    write_config '.'
+    run_backup
+    jq '.hostname = "some-other-machine"' "$BACKUP_REPO/backup-manifest.json" > "$SANDBOX/m"
+    cp "$SANDBOX/m" "$BACKUP_REPO/backup-manifest.json"
+}
+
+test_restore_warns_on_hostname_mismatch() {
+    make_foreign_backup
+    run_restore
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "WARN.*some-other-machine"
+}
+
+test_restore_dry_run_warns_on_hostname_mismatch() {
+    make_foreign_backup
+    bash "$RESTORE_SH" "$BACKUP_REPO" --dry-run > "$SANDBOX/dry.log" 2>&1 \
+        || fail "restore.sh --dry-run exited non-zero"
+    assert_contains "$(strip_color "$SANDBOX/dry.log")" "WARN.*some-other-machine"
+}
+
+test_restore_same_host_does_not_warn() {
+    write_config '.'
+    run_backup
+    run_restore
+    if strip_color "$SANDBOX/restore.log" | grep -q 'different machine'; then
+        fail "warned about a backup from this machine"
+    fi
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "Backup made on $(this_host)"
+}
+
+test_restore_without_manifest_still_works() {
+    write_config '.'
+    run_backup
+    rm -f "$BACKUP_REPO/backup-manifest.json"
+    rm -rf "$HOME/.claude/rules"
+    run_restore
+    assert_exists "$HOME/.claude/rules/item.md"
+}
+
 echo "Running tests"
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
     run_test "$t"
