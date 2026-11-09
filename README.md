@@ -280,13 +280,14 @@ Usage: bash backup.sh [backup-directory] [--fast] [--status] [--force] [--saniti
 #### restore.sh
 
 ```
-Usage: bash restore.sh [backup-directory] [--yes] [--dry-run] [--skip <list> | --only <list>]
+Usage: bash restore.sh [backup-directory] [--yes] [--dry-run] [--skip <list> | --only <list>] [--remap <from>=<to>]...
 ```
 
 - Reads `backup-config.json` from the backup directory
 - Prompts interactively for each category (global settings, MCP config, skills, plugins, user-content dirs, todos, projects); only prompts for user-content categories that actually have files in the backup
 - Creates timestamped backups of existing files before overwriting (e.g. `settings.json.backup.20260421_142301`). Files already identical to the backup are left alone, with no copy
 - `--skip <list>` leaves out comma-separated categories; `--only <list>` restores just those. For example, `--yes --skip mcp` on a machine that already has a login. Categories: `global`, `mcp`, `skills`, `plugins`, `plans`, `commands`, `agents`, `output-styles`, `rules`, `hooks`, `scheduled-tasks`, `todos`, `projects`
+- `--remap <from>=<to>` renames project folders whose name starts with `<from>` so it starts with `<to>` instead, for restoring onto another OS or home path. Repeatable; the first matching rule wins, and folders that match no rule keep their name. `--dry-run` shows each rename as `<old> -> <new>`. See [Cross-OS restores](#cross-os-restores)
 - Warns when a restored `CLAUDE.md` or other global `*.md` file `@`-imports a file that doesn't exist on this machine
 - `--yes` flag skips all prompts and restores everything
 - `--dry-run` (aliased `-n`) scans every file and classifies it as **NEW**, **CHANGED**, or **SAME** without writing anything. Implies `--yes`. Use this before a real restore to see exactly which existing files would be overwritten.
@@ -584,7 +585,7 @@ faithfully, and the bytes encode the source OS. From a real Windows-made backup:
 
 | What | In the backup | On the other OS |
 |------|---------------|-----------------|
-| Project slugs | `C--Users-me-projects-foo` | `restore.sh` writes them verbatim. Claude Code on Linux looks for `-home-me-projects-foo`, so memory and sessions are on disk but never loaded. `backup-config.json`'s `projects` list does **not** help — restore ignores it. |
+| Project slugs | `C--Users-me-projects-foo` | Restored under the same name unless you pass `--remap`. Claude Code on Linux looks for `-home-me-projects-foo`, so without it memory and sessions are on disk but never loaded. `backup-config.json`'s `projects` list does **not** help — restore ignores it. `restore.sh` warns when it sees this. |
 | `~/.claude.json` | `projects` map keyed by `C:/Users/...`; `mcpServers` wrapped in `cmd /c npx` | Per-project trust for directories that do not exist; MCP definitions that cannot start. A whole-file MCP restore is wrong on arrival. |
 | `settings.json` | `Bash(powershell.exe:*)`, `Bash(ipconfig:*)`, `env.CLAUDE_CODE_PLUGIN_DIRS` with `C:\...` and `;` separators, hooks that call Windows tools | Dead permission entries, a broken plugin-dir path, hooks that fail on every tool call. **Not** platform-agnostic, whatever the FAQ used to say. |
 | `plugins/installed_plugins.json` | `installPath` of `C:\Users\me\.claude\plugins\cache\...` | Plugins re-download their cache, but the registry still points at the old path. |
@@ -600,24 +601,25 @@ the OS-neutral parts of `settings.json` (deny list, `autoMode` policy, `modelSet
 `enabledPlugins`). That split — portable layer versus machine layer — is what makes
 cross-OS restores tractable; keep the two in separate files if you run more than one OS.
 
-Sequence that works today, with the scripts as they are:
+Sequence that works today:
 
-1. Restore **only** skills, the user-content directories, and projects. Answer no to
-   global settings, MCP config, and plugins.
-2. Rename the project slugs you want Claude Code to find. For the workspace root only:
+1. Restore **only** skills, the user-content directories, and projects, renaming the
+   project slugs you want Claude Code to find. For the workspace root only:
 
    ```bash
-   cd ~/.claude/projects
-   for d in C--Users-me-projects*; do mv "$d" "${d/C--Users-me-projects/-home-me-projects}"; done
+   bash restore.sh <backup> --only skills,plans,commands,agents,output-styles,rules,hooks,scheduled-tasks,projects \
+     --remap C--Users-me-projects=-home-me-projects
    ```
 
+   A slug is the project's full path with `:`, `\`, `/`, and `.` each replaced by `-`.
    Slugs with no counterpart on the new OS (`AppData`, scratch workspaces) stay as they
-   are; they are inert.
-3. Rebuild `settings.json` by hand from the backup's copy: keep what names a
+   are; they are inert. If two projects would end up with the same name, the restore
+   stops before writing anything.
+2. Rebuild `settings.json` by hand from the backup's copy: keep what names a
    cross-platform tool, drop anything naming an `.exe`, `.cmd`, `.ps1`, a drive letter,
    or a `;`-separated path list.
-4. Add MCP servers by hand in the native form (`npx` on POSIX, `cmd /c npx` on Windows).
-5. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
+3. Add MCP servers by hand in the native form (`npx` on POSIX, `cmd /c npx` on Windows).
+4. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
 6. `chmod +x` any restored `*.sh` / `*.py` that needs it; check `file` for CRLF.
 
 ### Proposed improvements (not yet implemented)
@@ -642,12 +644,6 @@ Sequence that works today, with the scripts as they are:
 
 Cross-OS specifically:
 
-- **`restore.sh --remap <from>=<to>`** — rename project slugs on the way in
-  (`C--Users-me-projects=-home-me-projects`), and rewrite the matching `projects` keys if
-  `~/.claude.json` is merged rather than replaced. The single change that makes memory
-  and sessions usable across OSes.
-- **Warn on slug-scheme mismatch.** A backup whose slugs start with `<letter>--` restored
-  on POSIX (or the reverse) should say so before the first prompt.
 - **`settings.json` merge mode with OS filtering** — when restoring to POSIX, drop (and
   list) entries naming `.exe`/`.cmd`/`.ps1`/drive-letter paths; the reverse for Windows.
 - **Execute bits.** Record the mode of `*.sh`/`*.py` at backup time, or have `restore.sh`
@@ -685,7 +681,7 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Q: Will this work across different OS platforms?
 
-**A:** Partly. Skills, user-content directories, memory and session *content* are portable. Project directory names encode the full source path (e.g., `C--Users-me-projects-myproject`) and `restore.sh` writes them verbatim, so on another OS they must be renamed before Claude Code will load them — editing `backup-config.json`'s `projects` list does not help, restore ignores it. `settings.json`, `~/.claude.json` and the plugin registry carry OS-specific commands and absolute paths and should be rebuilt rather than restored. See [Cross-OS restores](#cross-os-restores).
+**A:** Partly. Skills, user-content directories, memory and session *content* are portable. Project directory names encode the full source path (e.g., `C--Users-me-projects-myproject`) so on another OS they must be renamed with `restore.sh --remap` before Claude Code will load them — editing `backup-config.json`'s `projects` list does not help, restore ignores it. `settings.json`, `~/.claude.json` and the plugin registry carry OS-specific commands and absolute paths and should be rebuilt rather than restored. See [Cross-OS restores](#cross-os-restores).
 
 ### Q: Can I add new projects after initial setup?
 

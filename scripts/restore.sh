@@ -10,7 +10,7 @@
 # subagent transcripts and tool-result payloads) with
 # interactive prompts.
 #
-# Usage: bash restore.sh [backup-directory] [--yes] [--dry-run] [--skip <list> | --only <list>]
+# Usage: bash restore.sh [backup-directory] [--yes] [--dry-run] [--skip <list> | --only <list>] [--remap <from>=<to>]...
 #
 # Options:
 #   --yes        Non-interactive mode (skip all prompts, restore everything)
@@ -22,6 +22,11 @@
 #   --only LIST  Restore only these categories. Categories: global, mcp, skills,
 #                plugins, plans, commands, agents, output-styles, rules, hooks,
 #                scheduled-tasks, todos, projects.
+#   --remap FROM=TO
+#                Rename project folders whose name starts with FROM so it starts
+#                with TO instead (e.g. C--Users-me-projects=-home-me-projects).
+#                Repeatable; the first matching rule wins. For restoring onto a
+#                different OS or home path.
 
 set -e
 
@@ -52,6 +57,8 @@ IDENTICAL_COUNT=0
 MISSING_IMPORTS=()
 SELECT_MODE=""       # "skip" or "only" when --skip/--only was given
 SELECT_LIST=""       # ",a,b," so a category can be matched with its commas
+REMAP_FROM=()        # --remap rules; same index in both arrays
+REMAP_TO=()
 
 # Dry-run classification buckets — one array per category
 DRYRUN_NEW=()
@@ -182,6 +189,100 @@ category_selected() {
         only) [[ "$SELECT_LIST" == *",$1,"* ]] ;;
         *) return 0 ;;
     esac
+}
+
+# add_remap <from>=<to>. Runs during argument parsing, so a bad rule stops the
+# restore before anything is written. A folder name cannot contain a path separator,
+# and rejecting them also keeps a rule from writing outside ~/.claude/projects.
+add_remap() {
+    local value="$1" from to
+    from="${value%%=*}"
+    to="${value#*=}"
+    if [[ "$value" != *=* ]] || [ -z "$from" ] || [ -z "$to" ]; then
+        log_error "--remap requires <from>=<to>, got: '$value'"
+        exit 1
+    fi
+    if [[ "$value" == */* || "$value" == *\\* || "$to" == "." || "$to" == ".." ]]; then
+        log_error "--remap takes project folder names, not paths, got: '$value'"
+        log_error "Example: --remap C--Users-me-projects=-home-me-projects"
+        exit 1
+    fi
+    REMAP_FROM+=("$from")
+    REMAP_TO+=("$to")
+}
+
+# Prints the folder name a project restores to. printf because a name can start with -.
+remap_slug() {
+    local slug="$1" i
+    for i in "${!REMAP_FROM[@]}"; do
+        if [[ "$slug" == "${REMAP_FROM[$i]}"* ]]; then
+            printf '%s\n' "${REMAP_TO[$i]}${slug#"${REMAP_FROM[$i]}"}"
+            return 0
+        fi
+    done
+    printf '%s\n' "$slug"
+}
+
+# A project folder's name encodes its path: C--Users-me on Windows, -home-me elsewhere.
+slug_os() {
+    case "$1" in
+        [A-Za-z]--*) echo "Windows" ;;
+        -*) echo "Linux or macOS" ;;
+        *) echo "" ;;
+    esac
+}
+
+# Runs before the first prompt: applies the --remap rules on paper, stops if two
+# projects would merge, and warns if the backup came from another kind of OS.
+check_project_slugs() {
+    local this_os="Linux or macOS"
+    case "$(uname -s)" in
+        MINGW*|MSYS*|CYGWIN*) this_os="Windows" ;;
+    esac
+
+    local -A sources=() used=()
+    local dir slug target os i total=0 stranded=0 source_os=""
+    for dir in "$BACKUP_DIR/projects"/*/; do
+        [ -d "$dir" ] || continue
+        slug=$(basename "$dir")
+        target=$(remap_slug "$slug")
+        total=$((total + 1))
+
+        if [ -n "${sources[$target]:-}" ]; then
+            log_error "--remap would merge two projects into $target: ${sources[$target]} and $slug"
+            log_error "Nothing was restored. Adjust the --remap rules so each project keeps its own folder."
+            exit 1
+        fi
+        sources[$target]="$slug"
+
+        for i in "${!REMAP_FROM[@]}"; do
+            [[ "$slug" == "${REMAP_FROM[$i]}"* ]] && used[$i]=1
+        done
+
+        os=$(slug_os "$slug")
+        if [ -n "$os" ] && [ "$os" != "$this_os" ]; then
+            source_os="$os"
+        fi
+        os=$(slug_os "$target")
+        if [ -n "$os" ] && [ "$os" != "$this_os" ]; then
+            stranded=$((stranded + 1))
+        fi
+    done
+
+    for i in "${!REMAP_FROM[@]}"; do
+        if [ -z "${used[$i]:-}" ]; then
+            log_warn "WARNING: --remap rule ${REMAP_FROM[$i]}=${REMAP_TO[$i]} matched no project in this backup."
+        fi
+    done
+
+    if [ -n "$source_os" ]; then
+        log_warn "WARNING: this backup was made on $source_os; this machine runs $this_os."
+        log_warn "settings.json, ~/.claude.json, and the plugin registry contain paths from that system."
+    fi
+    if [ "$stranded" -gt 0 ]; then
+        log_warn "WARNING: $stranded of $total project(s) would land in folders Claude Code on this machine never reads,"
+        log_warn "so their memory and sessions would not be found. Rename them with --remap <from>=<to>."
+    fi
 }
 
 # prompt_restore <category key> <label shown in the prompt>
@@ -552,10 +653,16 @@ restore_projects() {
 
     for project in "${project_dirs[@]}"; do
         local src_base="$projects_dir/$project"
-        local dest_base="$CLAUDE_DIR/projects/$project"
+        local dest_project
+        dest_project=$(remap_slug "$project")
+        local dest_base="$CLAUDE_DIR/projects/$dest_project"
         local proj_count=0
 
-        log_detail "  Project: $project"
+        if [ "$dest_project" = "$project" ]; then
+            log_detail "  Project: $project"
+        else
+            log_detail "  Project: $project -> $dest_project"
+        fi
         if [ "$DRY_RUN" != "true" ]; then
             mkdir -p "$dest_base"
         fi
@@ -647,6 +754,13 @@ main() {
                 local option="${1%%=*}"
                 set_selection "${option#--}" "${1#*=}"
                 ;;
+            --remap)
+                add_remap "${2:-}"
+                shift
+                ;;
+            --remap=*)
+                add_remap "${1#*=}"
+                ;;
             *)
                 positional_args+=("$1")
                 ;;
@@ -680,6 +794,7 @@ main() {
     # Parse config
     parse_config
     show_manifest
+    check_project_slugs
 
     # Create claude dir if missing (skip in dry-run — we're not writing anything)
     if [ ! -d "$CLAUDE_DIR" ]; then
