@@ -32,7 +32,40 @@ seed_home() {
     echo '{}' > "$project/sess-1/subagents/agent.jsonl"
     echo 'out' > "$project/sess-1/tool-results/result.txt"
     echo '[]' > "$HOME/.claude/todos/todo.json"
+
+    echo '{"sessionId":"sess-1"}' > "$project/sess-1.meta.json"
+    echo '{"a":1}' > "$HOME/.claude/settings.json"
+    echo '{"b":2}' > "$HOME/.claude/settings.local.json"
+    echo '[]' > "$HOME/.claude/keybindings.json"
+    echo '# context' > "$HOME/.claude/EXTRA-CONTEXT.md"
+    mkdir -p "$HOME/.claude/skills/pkg/nested"
+    echo 'skill' > "$HOME/.claude/skills/pkg/SKILL.md"
+    echo 'helper' > "$HOME/.claude/skills/pkg/nested/helper.md"
+    local dir
+    for dir in plans commands agents output-styles rules hooks scheduled-tasks; do
+        mkdir -p "$HOME/.claude/$dir"
+        echo "$dir" > "$HOME/.claude/$dir/item.md"
+    done
+    cat > "$HOME/.claude.json" <<'JSON'
+{"oauthAccount":{"emailAddress":"secret-account@example.invalid"},
+ "mcpServers":{"myserver":{"command":"/home/me/bin/srv",
+   "args":["--host=secret-host.example.com"],
+   "env":{"API_KEY":"secret-token-value"}}}}
+JSON
 }
+
+strip_color() { sed 's/\x1b\[[0-9;]*m//g' "$1"; }
+
+assert_contains() {
+    grep -qE "$2" <<< "$1" || fail "expected output matching: $2"
+}
+
+assert_same_tree() {
+    diff -r "$1" "$2" > "$SANDBOX/diff.log" 2>&1 \
+        || fail "trees differ: $(head -n 5 "$SANDBOX/diff.log")"
+}
+
+commit_count() { git -C "$BACKUP_REPO" rev-list --count HEAD; }
 
 # write_config <jq expression applied to the default template>
 write_config() {
@@ -115,6 +148,74 @@ test_restore_honors_todos_false() {
     rm -rf "$HOME/.claude/todos"
     run_restore
     assert_missing "$HOME/.claude/todos/todo.json"
+}
+
+# ─── Core behavior (issue #4) ──────────────────────────────────────
+
+test_round_trip_restores_identical_tree() {
+    write_config '.'
+    run_backup
+    cp -a "$HOME" "$SANDBOX/seed"
+    rm -rf "$HOME" && mkdir -p "$HOME"
+    run_restore
+    assert_same_tree "$SANDBOX/seed" "$HOME"
+}
+
+test_dry_run_classifies_and_writes_nothing() {
+    write_config '.'
+    run_backup
+    rm "$HOME/.claude/plans/item.md"
+    echo 'tampered' > "$HOME/.claude/rules/item.md"
+    local same=$(($(find "$HOME" -type f | wc -l) - 1))
+    cp -a "$HOME" "$SANDBOX/before"
+
+    bash "$RESTORE_SH" "$BACKUP_REPO" --dry-run > "$SANDBOX/dry.log" 2>&1 \
+        || fail "restore.sh --dry-run exited non-zero"
+    local output
+    output=$(strip_color "$SANDBOX/dry.log")
+    assert_contains "$output" "NEW +1 file\(s\)"
+    assert_contains "$output" "CHANGED +1 file\(s\)"
+    assert_contains "$output" "SAME +$same file\(s\)"
+    assert_contains "$output" "CHANGED +.*/rules/item\.md"
+    assert_same_tree "$SANDBOX/before" "$HOME"
+}
+
+test_deleted_source_files_are_removed_from_backup() {
+    write_config '.'
+    run_backup
+    rm "$HOME/.claude/skills/pkg/nested/helper.md"
+    rm "$HOME/.claude/projects/-home-me-proj/memory/MEMORY.md"
+    run_backup
+    assert_missing "$BACKUP_REPO/skills/pkg/nested/helper.md"
+    assert_missing "$PROJECT_BACKUP/memory/MEMORY.md"
+    local changes
+    changes=$(git -C "$BACKUP_REPO" show --name-status --format= HEAD)
+    assert_contains "$changes" "^D.*skills/pkg/nested/helper\.md"
+    assert_contains "$changes" "^D.*memory/MEMORY\.md"
+}
+
+test_second_backup_makes_no_commit() {
+    write_config '.'
+    run_backup
+    local before
+    before=$(commit_count)
+    run_backup
+    [ "$(commit_count)" = "$before" ] || fail "second run created a commit"
+    assert_contains "$(strip_color "$SANDBOX/backup.log")" "No changes detected"
+}
+
+test_sanitize_removes_secrets_and_keeps_structure() {
+    write_config '.'
+    run_backup
+    bash "$BACKUP_SH" "$BACKUP_REPO" --sanitize "$SANDBOX/export" > "$SANDBOX/sanitize.log" 2>&1 \
+        || fail "backup.sh --sanitize exited non-zero: $(tail -n 3 "$SANDBOX/sanitize.log")"
+    local out="$SANDBOX/export/global/claude.json"
+    assert_exists "$out"
+    if grep -rq 'secret-' "$SANDBOX/export"; then
+        fail "export still contains a secret: $(grep -rl 'secret-' "$SANDBOX/export" | head -n 1)"
+    fi
+    [ "$(jq -r '.mcpServers.myserver.env.API_KEY' "$out")" = "<REDACTED>" ] \
+        || fail "env value was not redacted"
 }
 
 echo "Running tests"

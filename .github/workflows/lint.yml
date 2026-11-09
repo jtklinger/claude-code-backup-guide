@@ -25,6 +25,8 @@ jobs:
       - name: ShellCheck (advisory)
         continue-on-error: true
         run: shellcheck --severity=error scripts/*.sh
+      - name: Behavior tests — hard gate
+        run: bash tests/run.sh
 
   powershell:
     name: PowerShell (PSScriptAnalyzer)
