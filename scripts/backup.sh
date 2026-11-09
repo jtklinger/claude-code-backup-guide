@@ -647,8 +647,8 @@ sanitize_claude_json() {
                         elif startswith("--header") then .
                         elif test("^(authorization:|bearer )"; "i") then "<AUTH_TOKEN>"
                         elif test("^https?://") then "<URL>"
-                        elif test("\\\\.(com|local|net|org|io)([:/]|$)") then "<HOSTNAME>"
-                        elif test("^[0-9]+\\\\.[0-9]+\\\\.[0-9]+\\\\.[0-9]+") then "<HOSTNAME>"
+                        elif test("\\.(com|local|net|org|io)([:/]|$)") then "<HOSTNAME>"
+                        elif test("^[0-9]+\\.[0-9]+\\.[0-9]+\\.[0-9]+") then "<HOSTNAME>"
                         elif test("^(/.{2,}|[A-Z]:[/\\\\\\\\]|~/)") then "<PATH>"
                         else .
                         end
