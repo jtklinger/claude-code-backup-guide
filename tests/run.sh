@@ -353,6 +353,158 @@ test_restore_without_manifest_still_works() {
     assert_exists "$HOME/.claude/rules/item.md"
 }
 
+# ─── Restore fixes (issues #21, #24, #22, #25) ─────────────────────
+
+wipe_home() { rm -rf "$HOME" && mkdir -p "$HOME"; }
+
+count_timestamp_copies() { find "$HOME" -name '*.backup.*' | wc -l | tr -d ' '; }
+
+test_restore_makes_no_copy_of_identical_files() {
+    write_config '.'
+    run_backup
+    run_restore
+    [ "$(count_timestamp_copies)" = "0" ] || fail "made .backup copies of identical files"
+}
+
+test_restore_copies_then_replaces_changed_file() {
+    write_config '.'
+    run_backup
+    echo 'local edit' > "$HOME/.claude/rules/item.md"
+    run_restore
+    [ "$(count_timestamp_copies)" = "1" ] || fail "expected exactly one .backup copy"
+    [ "$(cat "$HOME/.claude/rules/item.md")" = "rules" ] || fail "changed file was not restored"
+    [ "$(cat "$HOME/.claude/rules"/item.md.backup.*)" = "local edit" ] || fail "local edit was not preserved"
+}
+
+test_restore_summary_lists_only_restored_files() {
+    write_config '.'
+    run_backup
+    wipe_home
+    mkdir -p "$HOME/.claude"
+    echo '{}' > "$HOME/.claude/policy-limits.json"
+    run_restore
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    if grep -q 'policy-limits' <<< "$output"; then
+        fail "summary listed a file the restore never wrote"
+    fi
+    assert_contains "$output" "skills: 2 file\(s\)"
+}
+
+test_restore_summary_counts_identical_files() {
+    write_config '.'
+    run_backup
+    echo 'local edit' > "$HOME/.claude/rules/item.md"
+    run_restore
+    local same=$(($(find "$HOME" -type f -not -name '*.backup.*' | wc -l) - 1))
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "Restored files \(1 total\)"
+    assert_contains "$output" "rules: 1 file\(s\)"
+    assert_contains "$output" "$same file\(s\) already identical"
+}
+
+test_skip_excludes_named_categories() {
+    write_config '.'
+    run_backup
+    wipe_home
+    bash "$RESTORE_SH" "$BACKUP_REPO" --yes --skip mcp,todos > "$SANDBOX/restore.log" 2>&1 \
+        || fail "restore.sh --skip exited non-zero: $(tail -n 3 "$SANDBOX/restore.log")"
+    assert_missing "$HOME/.claude.json"
+    assert_missing "$HOME/.claude/todos"
+    assert_exists "$HOME/.claude/skills/pkg/SKILL.md"
+    assert_exists "$HOME/.claude/rules/item.md"
+}
+
+test_only_restores_just_named_categories() {
+    write_config '.'
+    run_backup
+    wipe_home
+    bash "$RESTORE_SH" "$BACKUP_REPO" --yes --only=skills,rules > "$SANDBOX/restore.log" 2>&1 \
+        || fail "restore.sh --only exited non-zero: $(tail -n 3 "$SANDBOX/restore.log")"
+    assert_exists "$HOME/.claude/skills/pkg/SKILL.md"
+    assert_exists "$HOME/.claude/rules/item.md"
+    assert_missing "$HOME/.claude.json"
+    assert_missing "$HOME/.claude/CLAUDE.md"
+    assert_missing "$HOME/.claude/plans"
+    assert_missing "$HOME/.claude/projects"
+}
+
+test_unknown_category_is_refused_before_writing() {
+    write_config '.'
+    run_backup
+    wipe_home
+    if bash "$RESTORE_SH" "$BACKUP_REPO" --yes --skip mpc > "$SANDBOX/restore.log" 2>&1; then
+        fail "a misspelled category should be refused"
+    fi
+    assert_contains "$(strip_color "$SANDBOX/restore.log")" "mpc"
+    assert_missing "$HOME/.claude"
+}
+
+test_skip_and_only_together_are_refused() {
+    write_config '.'
+    run_backup
+    wipe_home
+    if bash "$RESTORE_SH" "$BACKUP_REPO" --yes --skip mcp --only skills > "$SANDBOX/restore.log" 2>&1; then
+        fail "--skip with --only should be refused"
+    fi
+    assert_missing "$HOME/.claude"
+}
+
+test_interactive_prompts_show_labels_and_honor_answers() {
+    write_config '.'
+    run_backup
+    wipe_home
+    yes n | bash "$RESTORE_SH" "$BACKUP_REPO" > "$SANDBOX/restore.log" 2>&1
+    local output
+    output=$(strip_color "$SANDBOX/restore.log")
+    assert_contains "$output" "Restore MCP config \(~/\.claude\.json\)\?"
+    assert_contains "$output" "Restore rules\?"
+    assert_contains "$output" "Restore Projects \(1 in backup\)\?"
+    assert_missing "$HOME/.claude.json"
+    assert_missing "$HOME/.claude/skills"
+}
+
+seed_imports() {
+    cat > "$HOME/.claude/CLAUDE.md" <<'MD'
+# settings
+@/nonexistent/shared/prefs.md
+@~/missing-from-home.md
+@EXTRA-CONTEXT.md
+@someone mentioned in prose
+MD
+}
+
+assert_import_warnings() {
+    assert_contains "$1" "WARNING.*/nonexistent/shared/prefs\.md"
+    assert_contains "$1" "WARNING.*missing-from-home\.md"
+    if grep -q 'WARNING.*EXTRA-CONTEXT' <<< "$1"; then
+        fail "warned about an import that exists in the backup"
+    fi
+    if grep -q 'WARNING.*someone' <<< "$1"; then
+        fail "treated prose as an import"
+    fi
+}
+
+test_restore_warns_about_missing_imports() {
+    seed_imports
+    write_config '.'
+    run_backup
+    wipe_home
+    run_restore
+    assert_import_warnings "$(strip_color "$SANDBOX/restore.log")"
+}
+
+test_dry_run_warns_about_missing_imports() {
+    seed_imports
+    write_config '.'
+    run_backup
+    wipe_home
+    bash "$RESTORE_SH" "$BACKUP_REPO" --dry-run > "$SANDBOX/dry.log" 2>&1 \
+        || fail "restore.sh --dry-run exited non-zero"
+    assert_import_warnings "$(strip_color "$SANDBOX/dry.log")"
+}
+
 echo "Running tests"
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
     run_test "$t"
