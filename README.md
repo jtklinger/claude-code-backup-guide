@@ -125,6 +125,25 @@ git push -u origin main
 
 ### 6. Restore on a new machine
 
+#### Before you start
+
+A fresh machine usually fails at `git clone` or the first commit, not at the restore.
+Check these first:
+
+- [ ] **GitHub login:** `gh auth login`, then `gh auth setup-git` so HTTPS clones and
+      pushes work. Or set up an SSH key (see [SSH keys for Git access](#ssh-keys-for-git-access)).
+- [ ] **Git identity:** `git config --global user.name "..."` and `user.email "..."`.
+      Without them the first commit fails with "empty ident name".
+- [ ] **Tools:** `jq` (see [jq not found](#jq-not-found)) and bash 4 or newer
+      (`bash --version`; on macOS, `brew install bash`).
+- [ ] **What your `CLAUDE.md` imports:** if it `@`-imports a file outside `~/.claude`,
+      such as a shared-config repo, clone that first. The restore brings back the
+      import line, not the file it points to.
+- [ ] **The backup repo's exact name:** `gh repo list <user> | grep backup`. A wrong
+      name gives a confusing "not found".
+
+#### Restore
+
 ```bash
 git clone git@github.com:YOUR_USER/claude-code-backup.git
 cd claude-code-backup
@@ -479,6 +498,13 @@ find ~/claude-code-backup/projects/*/sessions/ -name "*.jsonl" -mtime +30 -delet
 3. Restart Claude Code after restoring -- memory files are read on startup
 4. Verify the files exist: `ls ~/.claude/projects/<project-name>/memory/`
 
+### Clone, push, or first commit fails on a new machine
+
+**Problem:** `git clone` reports "not found" or asks for a password, a push is refused, or
+the first commit fails with "empty ident name"
+
+**Solution:** Work through the [new-machine checklist](#before-you-start) before restoring.
+
 ### Settings not applying after restore
 
 **Problem:** Settings do not take effect after running restore.sh
@@ -516,7 +542,7 @@ diff ~/.claude/settings.json ~/claude-code-backup/global/settings.json
 Field notes from a real restore (2026-11-03): one machine's backup restored onto a freshly
 installed laptop, which then became a backup member in its own right. The scripts did what
 they say; everything that bit was *around* them. Recorded here so the next restore goes
-faster, and as the to-do list for the next release.
+faster.
 
 ### The sequence that worked
 
@@ -623,24 +649,6 @@ Sequence that works today:
    as they are: fix any `cmd /c npx` wrapper to plain `npx`, or the reverse.
 3. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
 4. Check restored shell scripts with `file` for CRLF line endings.
-
-### Proposed improvements (not yet implemented)
-
-- **`backup.sh`: write a `backup-manifest.json`** (hostname, OS, Claude Code version,
-  script version, timestamp) on every run. `restore.sh` prints it and warns when the
-  hostname differs from the machine it is running on.
-- **`backup-config.json`: optional `"host"` field.** When set, `backup.sh` refuses to run
-  on a machine whose `hostname -s` differs, unless `--force`. Closes lesson 1 at the
-  source instead of relying on someone noticing.
-- **`restore.sh`: skip `backup_existing` when the file is already identical.** No
-  `.backup.*` clutter for SAME files.
-- **`restore.sh`: per-category skip flags** (e.g. `--skip mcp,todos`) so an unattended
-  restore can leave `~/.claude.json` alone without piping prompt answers.
-- **`restore.sh`: list only what it wrote** in the verification summary.
-- **`restore.sh`: after restoring `CLAUDE.md`, resolve its `@`-imports** and report any
-  target that does not exist.
-- **README: a new-machine pre-flight checklist** (auth, git identity, credential helper,
-  shared-config repo) ahead of the Quick Start restore step.
 
 ## FAQ
 
