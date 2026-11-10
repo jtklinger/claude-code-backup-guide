@@ -16,6 +16,7 @@ A config-driven system for backing up and restoring your complete Claude Code en
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
 - [Restoring to a Different Machine](#restoring-to-a-different-machine)
+- [Keeping Machines in Sync](#keeping-machines-in-sync)
 - [FAQ](#faq)
 - [Changelog](#changelog)
 - [Upgrading](#upgrading)
@@ -627,7 +628,8 @@ What *is* portable: memory contents, session content (once the slug is renamed),
 plans, commands, agents, output-styles, rules, the preferences half of `CLAUDE.md`, and
 the OS-neutral parts of `settings.json` (deny list, `autoMode` policy, `modelSettings`,
 `enabledPlugins`). That split — portable layer versus machine layer — is what makes
-cross-OS restores tractable; keep the two in separate files if you run more than one OS.
+cross-OS restores tractable; keep the two in separate files if you run more than one OS
+(see [Keeping Machines in Sync](#keeping-machines-in-sync)).
 
 Sequence that works today:
 
@@ -650,6 +652,46 @@ Sequence that works today:
 3. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
 4. Check restored shell scripts with `file` for CRLF line endings.
 
+<<<<<<< HEAD
+=======
+### Proposed improvements (not yet implemented)
+
+- **`backup.sh`: write a `backup-manifest.json`** (hostname, OS, Claude Code version,
+  script version, timestamp) on every run. `restore.sh` prints it and warns when the
+  hostname differs from the machine it is running on.
+- **`backup-config.json`: optional `"host"` field.** When set, `backup.sh` refuses to run
+  on a machine whose `hostname -s` differs, unless `--force`. Closes lesson 1 at the
+  source instead of relying on someone noticing.
+- **`restore.sh`: skip `backup_existing` when the file is already identical.** No
+  `.backup.*` clutter for SAME files.
+- **`restore.sh`: per-category skip flags** (e.g. `--skip mcp,todos`) so an unattended
+  restore can leave `~/.claude.json` alone without piping prompt answers.
+- **`restore.sh`: list only what it wrote** in the verification summary.
+- **`restore.sh`: after restoring `CLAUDE.md`, resolve its `@`-imports** and report any
+  target that does not exist.
+- **README: a new-machine pre-flight checklist** (auth, git identity, credential helper,
+  shared-config repo) ahead of the Quick Start restore step.
+
+## Keeping Machines in Sync
+
+A backup is for restoring the machine it came from. To keep several machines alike, keep
+the part of your config that is true everywhere (preferences, cross-platform permissions,
+MCP server definitions, shared skills) in a small private repo of its own, and merge it
+into each machine's `~/.claude` with `scripts/sync/sync-claude-config.sh`. Each machine
+keeps its own host facts, hooks, tokens, and OS-specific settings, and keeps its own
+backup repo.
+
+```bash
+cp -r templates/claude-shared ~/claude-shared     # start your shared layer
+bash scripts/sync/sync-claude-config.sh --dry-run ~/claude-shared
+bash scripts/sync/sync-claude-config.sh ~/claude-shared
+```
+
+`--check` reports drift and exits 1, and `scripts/sync/` includes a daily check for
+systemd and for Windows Task Scheduler. The full guide, including what each file merges
+and the Windows notes, is [`scripts/sync/README.md`](scripts/sync/README.md).
+
+>>>>>>> ef80213 (feat: add shared-config sync tooling under scripts/sync)
 ## FAQ
 
 ### Q: How is v2 different from v1? What's new in v2.1?

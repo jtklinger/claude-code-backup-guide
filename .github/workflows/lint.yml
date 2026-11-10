@@ -18,13 +18,13 @@ jobs:
       - name: Syntax check (bash -n) — hard gate
         run: |
           set -e
-          for f in scripts/*.sh; do
+          for f in scripts/*.sh scripts/sync/*.sh; do
             echo "bash -n $f"
             bash -n "$f"
           done
       - name: ShellCheck (advisory)
         continue-on-error: true
-        run: shellcheck --severity=error scripts/*.sh
+        run: shellcheck --severity=error scripts/*.sh scripts/sync/*.sh
       - name: Behavior tests — hard gate
         run: bash tests/run.sh
 
@@ -38,7 +38,7 @@ jobs:
         shell: pwsh
         run: |
           Install-Module PSScriptAnalyzer -RequiredVersion 1.25.0 -Force -Scope CurrentUser
-          $issues = Invoke-ScriptAnalyzer -Path scripts/windows -Recurse -Severity Error
+          $issues = Invoke-ScriptAnalyzer -Path scripts -Recurse -Severity Error
           if ($issues) {
             $issues | Format-Table -AutoSize
             throw "PSScriptAnalyzer found $($issues.Count) error-severity issue(s)"
