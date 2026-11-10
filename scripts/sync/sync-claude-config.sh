@@ -3,6 +3,9 @@
 #
 #   sync-claude-config.sh [shared-dir]            apply  — merge shared layer into ~/.claude
 #   sync-claude-config.sh --check [shared-dir]    report drift, exit 1 if any (no writes)
+#
+# Exit 2 means it could not run at all (no jq, no shared dir, a shared file missing),
+# so a scheduler can tell that apart from drift.
 #   sync-claude-config.sh --dry-run [shared-dir]  show what apply would change, no writes
 #
 # shared-dir defaults to $CLAUDE_SHARED_DIR. It holds GLOBAL-PREFS.md,
@@ -60,10 +63,10 @@ IMPORT_BLOCK="## Shared preferences
 
 $IMPORT_LINE"
 
-command -v jq >/dev/null || { echo "jq is required" >&2; exit 1; }
-[ -f "$SHARED_PREFS" ]    || { echo "missing $SHARED_PREFS" >&2; exit 1; }
-[ -f "$SHARED_SETTINGS" ] || { echo "missing $SHARED_SETTINGS" >&2; exit 1; }
-[ -f "$SHARED_MCP" ]      || { echo "missing $SHARED_MCP" >&2; exit 1; }
+command -v jq >/dev/null || { echo "jq is required" >&2; exit 2; }
+[ -f "$SHARED_PREFS" ]    || { echo "missing $SHARED_PREFS" >&2; exit 2; }
+[ -f "$SHARED_SETTINGS" ] || { echo "missing $SHARED_SETTINGS" >&2; exit 2; }
+[ -f "$SHARED_MCP" ]      || { echo "missing $SHARED_MCP" >&2; exit 2; }
 
 drift=0
 note() { echo "  $*"; }
@@ -124,9 +127,13 @@ else
     note "settings.json: drift —"
     diff <(jq -S . <<<"$current_settings") <(jq -S . <<<"$merged") | sed 's/^/    /' || true
     if [ "$mode" = apply ]; then
-        [ ! -f "$SETTINGS" ] || cp "$SETTINGS" "$SETTINGS.bak"
+        if [ -f "$SETTINGS" ]; then
+            cp "$SETTINGS" "$SETTINGS.bak"
+            note "settings.json: merged (previous saved to settings.json.bak)"
+        else
+            note "settings.json: created"
+        fi
         jq . <<<"$merged" > "$SETTINGS"
-        note "settings.json: merged (previous saved to settings.json.bak)"
     fi
 fi
 
@@ -222,9 +229,13 @@ for name in $(jq -r '.mcpServers | keys[]' "$SHARED_MCP"); do
     fi
 done
 if [ "$mcp_drift" -eq 1 ] && [ "$mode" = apply ]; then
-    [ ! -f "$CLAUDE_JSON" ] || cp "$CLAUDE_JSON" "$CLAUDE_JSON.bak"
+    if [ -f "$CLAUDE_JSON" ]; then
+        cp "$CLAUDE_JSON" "$CLAUDE_JSON.bak"
+        note "mcp: merged (previous saved to $(basename "$CLAUDE_JSON").bak)"
+    else
+        note "mcp: created $(basename "$CLAUDE_JSON")"
+    fi
     jq . <<<"$mcp_merged" > "$CLAUDE_JSON"
-    note "mcp: merged (previous saved to $(basename "$CLAUDE_JSON").bak)"
 fi
 
 # --- 6. plugins ----------------------------------------------------------------

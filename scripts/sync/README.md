@@ -24,7 +24,7 @@ layer**).
 
 | File | What it does |
 |------|--------------|
-| `sync-claude-config.sh` | Applies the shared layer. `--check` reports drift and exits 1 (writes nothing); `--dry-run` shows what an apply would change (writes nothing). |
+| `sync-claude-config.sh` | Applies the shared layer. `--check` reports drift and exits 1 (writes nothing); `--dry-run` shows what an apply would change (writes nothing). Exit 2 means it could not run: no `jq`, or the shared folder or one of its three files is missing. |
 | `config-check-run.sh` | Scheduled runner: `--check` into a dated log ending in `=== run finished rc=N at <time> ===`, exiting with the check's status. |
 | `systemd/claude-config-check.{service,timer}` | Daily check on Linux (systemd user timer). |
 | `windows/Check-ClaudeConfig.ps1` | Daily check on Windows, through Git Bash, with optional email. |

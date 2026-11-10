@@ -1091,6 +1091,43 @@ test_config_check_runner_logs_and_exits_with_check_status() {
     unset CLAUDE_CHECK_LOG_DIR
 }
 
+test_sync_exits_2_when_it_cannot_run() {
+    make_shared
+    rm "$SHARED/mcp.shared.json"
+    local rc=0
+    sync_as Linux --check "$SHARED" || rc=$?
+    [ "$rc" -eq 2 ] || fail "missing shared file: expected exit 2, got $rc"
+    export CLAUDE_CHECK_LOG_DIR="$SANDBOX/logs"
+    rc=0
+    bash "$CHECK_RUN_SH" "$SHARED" || rc=$?
+    unset CLAUDE_CHECK_LOG_DIR
+    [ "$rc" -eq 2 ] || fail "runner: expected exit 2, got $rc"
+    assert_contains "$(cat "$SANDBOX"/logs/check-*.log)" "=== run finished rc=2 at "
+
+    echo '{}' > "$SHARED/mcp.shared.json"
+    mkdir -p "$SANDBOX/nojq"
+    local tool
+    for tool in uname basename dirname cat; do ln -s "$(command -v "$tool")" "$SANDBOX/nojq/$tool"; done
+    rc=0
+    PATH="$SANDBOX/nojq" "$BASH" "$SYNC_SH" --check "$SHARED" > "$SANDBOX/sync.log" 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "missing jq: expected exit 2, got $rc: $(cat "$SANDBOX/sync.log")"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "jq is required"
+}
+
+test_sync_mentions_bak_only_when_it_made_one() {
+    make_shared
+    rm "$HOME/.claude/settings.json" "$HOME/.claude.json"
+    sync_as Linux "$SHARED" || fail "sync exited non-zero"
+    assert_no_match "$(cat "$SANDBOX/sync.log")" "previous saved"
+    edit_json "$SHARED/settings.shared.json" '.permissions.allow += ["Bash(git log:*)"]'
+    edit_json "$SHARED/mcp.shared.json" '.mcpServers.other = {"command": "other"}'
+    sync_as Linux "$SHARED" || fail "sync exited non-zero"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "previous saved to settings.json.bak"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "previous saved to .claude.json.bak"
+    assert_exists "$HOME/.claude/settings.json.bak"
+    assert_exists "$HOME/.claude.json.bak"
+}
+
 echo "Running tests"
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
     run_test "$t"
