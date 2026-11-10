@@ -37,7 +37,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.5.1"
+SCRIPT_VERSION="2.6.0"
 
 # This backup toolkit requires bash 4+ (backup.sh uses associative arrays). Enforce
 # the same requirement here so a fresh-machine restore fails early with a clear

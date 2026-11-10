@@ -21,7 +21,7 @@
 
 set -e
 
-SCRIPT_VERSION="2.5.1"
+SCRIPT_VERSION="2.6.0"
 
 # Associative arrays (per-category counters + the project-dedup `seen` map) require
 # bash 4+. Stock macOS ships bash 3.2, where `declare -A` fails at runtime. Check up
@@ -186,10 +186,11 @@ parse_config() {
             # Expand the glob with word-splitting disabled so a pattern that
             # contains a space is treated as one literal token, never split into
             # args that would glob against the current working directory.
+            # IFS is restored on the next line; tests/run.sh covers this.
             shopt -s nullglob
-            saved_ifs=$IFS; IFS=
+            saved_ifs=$IFS; IFS=  # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
             matches=( "$CLAUDE_DIR/projects/"$pattern )
-            IFS=$saved_ifs
+            IFS=$saved_ifs  # nosemgrep: bash.lang.security.ifs-tampering.ifs-tampering
             shopt -u nullglob
             for dir in "${matches[@]}"; do
                 [ -d "$dir" ] || continue

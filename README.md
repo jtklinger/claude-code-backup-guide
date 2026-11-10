@@ -1,6 +1,6 @@
 # Claude Code Backup & Restore Guide
 
-**Current release: v2.5.1** (see [changelog](#changelog))
+**Current release: v2.6.0** (see [changelog](#changelog))
 
 A config-driven system for backing up and restoring your complete Claude Code environment — settings, memory, skills, plugins, user-content directories (plans, commands, agents, output-styles, rules, hooks, scheduled-tasks), sessions, subagent transcripts, tool-result payloads, and more.
 
@@ -31,6 +31,8 @@ This guide provides three scripts that back up the full Claude Code data model t
 - **`init.sh`** — First-time setup. Scans your projects, generates `backup-config.json`.
 - **`backup.sh`** — Config-driven, modular backup with auto-commit and optional auto-push. Fully non-interactive (safe for cron).
 - **`restore.sh`** — Interactive restore with per-category prompts (`--yes` for unattended; `--dry-run` to preview without writing).
+
+Separately, `scripts/sync/` keeps several machines' settings alike from one shared folder; see [Keeping Machines in Sync](#keeping-machines-in-sync).
 
 **Requirements:** bash 4+, git, [jq](https://jqlang.github.io/jq/). The scripts use associative arrays, so bash 4 or newer is required — stock macOS ships bash 3.2, so on macOS run `brew install bash` and invoke with the newer bash (e.g. `/opt/homebrew/bin/bash`). Windows Git Bash and modern Linux already ship bash 4+.
 
@@ -374,7 +376,8 @@ git push -u origin main
 
 | Data | Action |
 |------|--------|
-| MCP server hostnames | Replaced with `<HOSTNAME>` |
+| MCP server hostnames, including standalone arguments such as `db.example.lan` (names ending in `.com`, `.net`, `.org`, `.io`, `.local`, `.lan`, `.internal`, `.home.arpa`, or `.corp`) | Replaced with `<HOSTNAME>` |
+| IP addresses in MCP args | Replaced with `<HOSTNAME>` |
 | MCP usernames | Replaced with `<USERNAME>` |
 | SSH key paths | Replaced with `<SSH_KEY_PATH>` |
 | Auth tokens / Bearer tokens | Replaced with `<AUTH_TOKEN>` |
@@ -516,6 +519,7 @@ the first commit fails with "empty ident name"
 2. Check file permissions: `ls -la ~/.claude/`
 3. Verify file contents: `cat ~/.claude/settings.json`
 4. Check for `.backup.*` files that may indicate the restore created backups of conflicting files
+5. `settings.json` is merged, not replaced: this machine keeps its own `hooks`, `statusLine`, and `model`, and on a backup from another OS the restore drops entries that only work there and lists each one. To take the backup's file exactly as it is, run the restore again with `--settings-replace`
 
 ### MCP servers not connecting after restore
 
@@ -523,7 +527,7 @@ the first commit fails with "empty ident name"
 
 **Solutions:**
 
-1. OAuth tokens in `~/.claude.json` may have expired -- re-authenticate with the affected services
+1. The restore merges the backup's servers into this machine's `~/.claude.json` and keeps this machine's login and each server's local `env` and `headers`. A server that was new to this machine arrives with the backup's credentials, which may have expired -- re-authenticate with the affected services. (With `--mcp-replace`, the whole file, login included, came from the backup.)
 2. Verify network connectivity to the MCP server endpoints
 3. Check that any local dependencies (npm packages, binaries) are installed on the new machine
 4. Run `claude mcp list` to see the current status
@@ -570,6 +574,7 @@ faster.
    the first lesson below for why this is step 7 and not step 12.
 8. **First backup by hand**, confirm the push landed, then enable the schedule.
 9. **Delete the `.backup.<timestamp>` copies** the restore left behind (see lesson 4).
+   Since v2.6.0 only files that actually changed get one.
 
 ### Lessons learned
 
@@ -580,25 +585,32 @@ faster.
    per machine, so the new machine's first scheduled run would overwrite the source
    machine's disaster-recovery copy. This was caught 26 minutes before the first run.
    One backup repo per machine, created *before* the timer goes live.
+   *Since v2.6.0:* `backup-config.json` can name its machine (`host`), and `backup.sh`
+   refuses to run anywhere else.
 2. **A restore copies the machine layer too.** Host facts in `CLAUDE.md`, per-project
    memory, session history — all of it describes the source machine. The scripts cannot
    tell the two layers apart; you have to.
 3. **Auth is the first blocker, not the scripts.** An expired `gh` keyring token and no
    SSH keys stopped the clone before anything else ran. Nothing in the restore path
-   checks for this up front.
+   checks for this up front. *Since then:* the [new-machine checklist](#before-you-start)
+   covers it.
 4. **SAME files still get `.backup.*` copies.** `restore.sh` backs up every existing
    destination file before writing, even when `cmp` already proved it identical. One
    restore left 230 such copies under `~/.claude/skills/`, and the next scheduled backup
-   swept them all into the repo.
+   swept them all into the repo. *Fixed in v2.6.0:* identical files are left alone, with
+   no copy.
 5. **The dry run earned its keep.** It was the only thing that made the
    `~/.claude.json` overwrite visible before it happened. Always run it first on a
-   machine that already has a Claude Code login.
+   machine that already has a Claude Code login. *Since v2.6.0:* the restore merges MCP
+   servers into `~/.claude.json` and keeps the login; only `--mcp-replace` overwrites it.
 6. **The restore is not self-contained when `CLAUDE.md` imports from outside
    `~/.claude`.** The import line comes back; the file it points to does not. A missing
-   import target fails silently at load time.
+   import target fails silently at load time. *Since v2.6.0:* the restore warns about
+   each missing import target, in real and dry runs.
 7. **The restore summary over-reports.** The verification block lists every `*.md` and
    `*.json` in the `~/.claude` root — including files the restore never touched — so it
-   is not a record of what was written.
+   is not a record of what was written. *Fixed in v2.6.0:* the summary lists only what
+   the restore wrote, grouped by category.
 8. **The toolchain is not in the backup.** Node version, `rg`, `gcloud`, SSH config and
    keys: none of it comes back, but the restored `CLAUDE.md` and `settings.json` assume
    it is there.
@@ -709,13 +721,23 @@ v2.1 adds scheduled-tasks, subagent transcripts, tool-result payloads, and futur
 
 ### Q: What happens to existing files during restore?
 
-**A:** The restore script creates timestamped backups of any existing file before overwriting it (e.g., `settings.json.backup.20260305_140000`). You can always roll back by copying the `.backup.*` file over the restored version.
+**A:** Files already identical to the backup are left alone. Any other existing file is copied to a timestamped backup before it is overwritten (e.g., `settings.json.backup.20260305_140000`), so you can roll back by copying the `.backup.*` file over the restored version. Two files are merged rather than overwritten: `settings.json` and `~/.claude.json` (MCP servers); `--settings-replace` and `--mcp-replace` overwrite them instead. See [restore.sh](#restoresh).
 
 ## Changelog
 
-### Unreleased
+### v2.6.0 (2026-11-10)
 
-- **Docs:** new [Restoring to a Different Machine](#restoring-to-a-different-machine) section — the sequence that worked on a real cross-machine restore, nine lessons learned, a [Cross-OS restores](#cross-os-restores) subsection built from inspecting a real Windows-made backup, and the list of script improvements they point to. The cross-platform FAQ answer is corrected: the settings files are not platform-agnostic. No script changes.
+- **Changed: restore merges MCP servers and `settings.json` instead of replacing them.** The backup's MCP servers are added to this machine's `~/.claude.json`; a server on both sides takes the backup's definition but keeps this machine's `env` and `headers`, and the login, project trust and everything else in the file stay as they are. `settings.json` lists such as `permissions.allow` are joined, other settings take the backup's value key by key, and this machine keeps its own `hooks`, `statusLine`, and `model`. `--mcp-replace` and `--settings-replace` bring back the old whole-file behavior; use `--mcp-replace` when rebuilding the same machine from nothing.
+- **New: cross-OS restores.** `restore.sh` warns when a backup came from another kind of OS, `--remap <from>=<to>` renames project folders on the way in, and `settings.json` entries that only work on the other OS (Windows programs, drive letters, `;` path lists, or `/home` and `/Users` paths going the other way) are dropped and listed. See [Cross-OS restores](#cross-os-restores).
+- **New: host guard and backup manifest.** An optional `host` in `backup-config.json` makes `backup.sh` refuse to run on any other machine unless `--force` is passed; `init.sh` sets it for new setups. `backup.sh` commits `backup-manifest.json` (hostname, OS, Claude Code version, script version), and `restore.sh` prints it and warns when the backup came from a different machine.
+- **New: `restore.sh --skip <list>` and `--only <list>`** choose categories by name.
+- **Improved restores.** Files already identical to the backup are left alone, with no `.backup.*` copy. The summary lists only what the restore wrote. A global `*.md` that `@`-imports a missing file gets a warning. On Linux and macOS, scripts in `skills/`, `hooks/`, and `~/.claude` get their execute bit back. On Windows, a path too long to write is warned about and counted instead of stopping the restore.
+- **New: shared-config sync (`scripts/sync/`).** Keeps several machines' settings alike from one shared folder, with a daily drift check for systemd and Windows Task Scheduler. See [Keeping Machines in Sync](#keeping-machines-in-sync).
+- **Fixed: `include_sessions: false` and `include_todos: false` were ignored** by both `backup.sh` and `restore.sh`. Turning sessions off now also skips subagent transcripts and tool results.
+- **Fixed: `--sanitize` missed standalone hostnames and IP addresses** in MCP server arguments, and now also redacts names ending in `.lan`, `.internal`, `.home.arpa`, or `.corp`.
+- **Docs:** new [Restoring to a Different Machine](#restoring-to-a-different-machine) section with field notes from a real restore, a [Cross-OS restores](#cross-os-restores) subsection, and a [new-machine checklist](#before-you-start).
+- **Tests:** `tests/run.sh` (plain bash, throwaway `HOME`) now runs in CI; CI dependencies are pinned and kept current by Dependabot.
+- **No config schema changes** — existing `backup-config.json` (version `1`) works without edits; `host` is optional.
 
 ### v2.5.1 (2026-09-22)
 
@@ -813,7 +835,7 @@ bash scripts/backup.sh /path/to/your-backup --status    # version, last commit, 
 ```
 
 ```
-Claude Code Backup Script v2.5.1
+Claude Code Backup Script v2.6.0
 ==================================
 ```
 
@@ -835,7 +857,7 @@ Releases are tagged, so you can pin a machine to a known-good version:
 
 ```bash
 cd /path/to/claude-code-backup-guide
-git checkout v2.5.1   # stay on the exact release
+git checkout v2.6.0   # stay on the exact release
 # ... later, when you want to upgrade:
 git checkout main && git pull
 ```
@@ -858,7 +880,7 @@ This tool uses two distinct version numbers, which move independently:
 
 | Version | Where it lives | Bumped when |
 |---------|---------------|-------------|
-| **Script version** (`SCRIPT_VERSION="2.5.1"` in each script, printed in the banner) | `scripts/*.sh` | Every release. Follows [SemVer](https://semver.org): major for breaking changes to invocation or output layout, minor for new features, patch for bug fixes. |
+| **Script version** (`SCRIPT_VERSION="2.6.0"` in each script, printed in the banner) | `scripts/*.sh` | Every release. Follows [SemVer](https://semver.org): major for breaking changes to invocation or output layout, minor for new features, patch for bug fixes. |
 | **Config schema version** (`"version": 1` in `backup-config.json`) | `backup-config.json`, enforced at parse time | Only when the config file format changes in a backwards-incompatible way. Currently `1`. |
 
 If you're reporting an issue, include the script ve

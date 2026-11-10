@@ -105,6 +105,19 @@ run_test() {
     rm -rf "$SANDBOX"
 }
 
+# ─── project patterns ──────────────────────────────────────────────
+
+# backup.sh clears IFS while expanding a pattern; without that, a pattern with a
+# space splits in two and the second half globs against the current directory.
+test_project_pattern_with_space_is_one_pattern() {
+    mkdir -p "$HOME/.claude/projects/my proj-1/memory" "$SANDBOX/cwd/proj-elsewhere"
+    echo 'note' > "$HOME/.claude/projects/my proj-1/memory/MEMORY.md"
+    write_config '.projects = ["my proj*"]'
+    (cd "$SANDBOX/cwd" && run_backup)
+    assert_exists "$BACKUP_REPO/projects/my proj-1/memory/MEMORY.md"
+    assert_missing "$BACKUP_REPO/projects/proj-elsewhere"
+}
+
 # ─── include_sessions / include_todos (issue #15) ──────────────────
 
 test_sessions_false_skips_all_session_data() {
