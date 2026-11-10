@@ -1,0 +1,9 @@
+[Unit]
+Description=Daily drift check of the shared Claude Code config layer
+
+[Service]
+Type=oneshot
+# Edit both paths: your shared-config directory, and where you cloned this guide.
+Environment=CLAUDE_SHARED_DIR=%h/claude-shared
+ExecStart=/bin/bash %h/claude-code-backup-guide/scripts/sync/config-check-run.sh
+TimeoutStartSec=300

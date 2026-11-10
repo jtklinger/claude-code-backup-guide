@@ -11,6 +11,7 @@ Config-driven toolkit for backing up and restoring the full Claude Code environm
 - `scripts/init.sh` — First-time setup: scans `~/.claude/projects/`, generates `backup-config.json`
 - `scripts/backup.sh` — Non-interactive backup (cron-safe): reads config, copies changed files, auto-commits, optionally pushes
 - `scripts/restore.sh` — Interactive restore with per-category prompts (`--yes` for unattended; `--dry-run` to preview NEW/CHANGED/SAME classification without writing anything)
+- `scripts/sync/` — Shared-config sync, separate from backup: `sync-claude-config.sh` merges a shared layer (a directory such as `templates/claude-shared/`) into `~/.claude` (apply / `--check` / `--dry-run`), plus a daily drift check for systemd and Windows Task Scheduler. See `scripts/sync/README.md`.
 - `templates/.gitignore` — Recommended `.gitignore` for user backup repositories
 - `templates/backup-config.json` — Default config template
 - `docs/plans/` — Design documents

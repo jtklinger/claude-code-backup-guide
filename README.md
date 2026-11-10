@@ -16,6 +16,7 @@ A config-driven system for backing up and restoring your complete Claude Code en
 - [Security](#security)
 - [Troubleshooting](#troubleshooting)
 - [Restoring to a Different Machine](#restoring-to-a-different-machine)
+- [Keeping Machines in Sync](#keeping-machines-in-sync)
 - [FAQ](#faq)
 - [Changelog](#changelog)
 - [Upgrading](#upgrading)
@@ -627,7 +628,8 @@ What *is* portable: memory contents, session content (once the slug is renamed),
 plans, commands, agents, output-styles, rules, the preferences half of `CLAUDE.md`, and
 the OS-neutral parts of `settings.json` (deny list, `autoMode` policy, `modelSettings`,
 `enabledPlugins`). That split — portable layer versus machine layer — is what makes
-cross-OS restores tractable; keep the two in separate files if you run more than one OS.
+cross-OS restores tractable; keep the two in separate files if you run more than one OS
+(see [Keeping Machines in Sync](#keeping-machines-in-sync)).
 
 Sequence that works today:
 
@@ -649,6 +651,25 @@ Sequence that works today:
    as they are: fix any `cmd /c npx` wrapper to plain `npx`, or the reverse.
 3. Let plugins reinstall: `claude plugin install <name> --scope user` per enabled plugin.
 4. Check restored shell scripts with `file` for CRLF line endings.
+
+## Keeping Machines in Sync
+
+A backup is for restoring the machine it came from. To keep several machines alike, keep
+the part of your config that is true everywhere (preferences, cross-platform permissions,
+MCP server definitions, shared skills) in a small private repo of its own, and merge it
+into each machine's `~/.claude` with `scripts/sync/sync-claude-config.sh`. Each machine
+keeps its own host facts, hooks, tokens, and OS-specific settings, and keeps its own
+backup repo.
+
+```bash
+cp -r templates/claude-shared ~/claude-shared     # start your shared layer
+bash scripts/sync/sync-claude-config.sh --dry-run ~/claude-shared
+bash scripts/sync/sync-claude-config.sh ~/claude-shared
+```
+
+`--check` reports drift and exits 1, and `scripts/sync/` includes a daily check for
+systemd and for Windows Task Scheduler. The full guide, including what each file merges
+and the Windows notes, is [`scripts/sync/README.md`](scripts/sync/README.md).
 
 ## FAQ
 

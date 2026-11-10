@@ -965,6 +965,169 @@ test_settings_dry_run_lists_drops_and_writes_nothing() {
     assert_contains "$(strip_color "$SANDBOX/restore.log")" "Dropped .*powershell\.exe"
 }
 
+# ─── Shared-config sync (issue #32) ────────────────────────────────
+
+SYNC_SH="$REPO_ROOT/scripts/sync/sync-claude-config.sh"
+CHECK_RUN_SH="$REPO_ROOT/scripts/sync/config-check-run.sh"
+
+make_shared() {
+    SHARED="$SANDBOX/shared"
+    mkdir -p "$SHARED/skills/shared-skill"
+    echo '# shared prefs' > "$SHARED/GLOBAL-PREFS.md"
+    echo 'shared skill' > "$SHARED/skills/shared-skill/SKILL.md"
+    cat > "$SHARED/settings.shared.json" <<'JSON'
+{"alwaysThinkingEnabled":true,
+ "permissions":{"allow":["Bash(git status:*)"],"deny":["Bash(rm -rf /:*)"]},
+ "retiredAllows":["Bash(old-tool:*)"],
+ "env":{"SHARED_VAR":"1"},
+ "statusLine":{"type":"command","command":"shared-status"}}
+JSON
+    echo '{"mcpServers":{"myserver":{"type":"stdio","command":"npx","args":["-y","pkg"]}}}' > "$SHARED/mcp.shared.json"
+    cat > "$HOME/.claude/settings.json" <<'JSON'
+{"model":"local-model","permissions":{"allow":["Bash(make:*)","Bash(old-tool:*)"]},
+ "env":{"LOCAL_VAR":"1"},"statusLine":{"type":"command","command":"local-status"}}
+JSON
+}
+
+# sync_as <uname -s value> <sync-claude-config.sh args...>
+sync_as() {
+    local os="$1" real_uname
+    shift
+    real_uname=$(command -v uname)
+    mkdir -p "$SANDBOX/bin"
+    cat > "$SANDBOX/bin/uname" <<STUB
+#!/bin/bash
+if [ "\$1" = "-s" ]; then echo "$os"; else exec "$real_uname" "\$@"; fi
+STUB
+    chmod +x "$SANDBOX/bin/uname"
+    PATH="$SANDBOX/bin:$PATH" bash "$SYNC_SH" "$@" > "$SANDBOX/sync.log" 2>&1
+}
+
+home_snapshot() { (cd "$HOME" && find . -type f -exec md5sum {} + | sort); }
+
+test_sync_apply_merges_shared_layer() {
+    make_shared
+    sync_as Linux "$SHARED" || fail "sync exited non-zero: $(tail -n 3 "$SANDBOX/sync.log")"
+    grep -qxF "@$SHARED/GLOBAL-PREFS.md" "$HOME/.claude/CLAUDE.md" || fail "import line missing"
+    local f="$HOME/.claude/settings.json"
+    [ "$(jq -c '.permissions.allow' "$f")" = '["Bash(git status:*)","Bash(make:*)"]' ] \
+        || fail "allow not merged: $(jq -c '.permissions.allow' "$f")"
+    [ "$(jq -c '.env' "$f")" = '{"LOCAL_VAR":"1","SHARED_VAR":"1"}' ] || fail "env not merged: $(jq -c '.env' "$f")"
+    [ "$(jq -r '.statusLine.command' "$f")" = "local-status" ] || fail "local statusLine replaced"
+    [ "$(jq -r '.model' "$f")" = "local-model" ] || fail "local model replaced"
+    [ "$(jq -r 'has("autoMode")' "$f")" = "false" ] || fail "wrote autoMode the shared layer does not have"
+    assert_exists "$HOME/.claude/skills/shared-skill/SKILL.md"
+    assert_exists "$HOME/.claude/skills/pkg/SKILL.md"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "skills/pkg: untracked"
+    [ "$(jq -r '.mcpServers.myserver.env.API_KEY' "$HOME/.claude.json")" = "secret-token-value" ] \
+        || fail "local MCP env not kept"
+    [ "$(jq -r '.mcpServers.myserver.command' "$HOME/.claude.json")" = "npx" ] || fail "shared MCP definition not applied"
+    [ "$(jq -r '.oauthAccount.emailAddress' "$HOME/.claude.json")" = "secret-account@example.invalid" ] \
+        || fail "rest of ~/.claude.json changed"
+    sync_as Linux --check "$SHARED" || fail "--check reported drift right after apply: $(tail -n 5 "$SANDBOX/sync.log")"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "shared Claude config in sync"
+}
+
+test_sync_check_reports_drift_and_writes_nothing() {
+    make_shared
+    local before
+    before=$(home_snapshot)
+    if sync_as Linux --check "$SHARED"; then
+        fail "--check exited 0 despite drift"
+    fi
+    [ "$before" = "$(home_snapshot)" ] || fail "--check changed files"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "out of sync"
+}
+
+test_sync_dry_run_on_bare_machine_writes_nothing() {
+    make_shared
+    rm "$HOME/.claude/settings.json" "$HOME/.claude.json"
+    local before
+    before=$(home_snapshot)
+    sync_as Linux --dry-run "$SHARED" || fail "dry run exited non-zero: $(tail -n 3 "$SANDBOX/sync.log")"
+    [ "$before" = "$(home_snapshot)" ] || fail "dry run wrote files"
+    assert_missing "$HOME/.claude/settings.json"
+    assert_missing "$HOME/.claude.json"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "mcp/myserver: MISSING"
+}
+
+test_sync_apply_on_bare_machine_creates_files() {
+    make_shared
+    rm "$HOME/.claude/settings.json" "$HOME/.claude.json"
+    sync_as Linux "$SHARED" || fail "sync exited non-zero: $(tail -n 3 "$SANDBOX/sync.log")"
+    [ "$(jq -r '.statusLine.command' "$HOME/.claude/settings.json")" = "shared-status" ] || fail "shared statusLine not set"
+    [ "$(jq -c '.mcpServers | keys' "$HOME/.claude.json")" = '["myserver"]' ] || fail "MCP server not added"
+}
+
+test_sync_takes_shared_dir_from_environment() {
+    make_shared
+    CLAUDE_SHARED_DIR="$SHARED" sync_as Linux --dry-run || fail "CLAUDE_SHARED_DIR not used: $(tail -n 3 "$SANDBOX/sync.log")"
+    local rc=0
+    sync_as Linux --dry-run || rc=$?
+    [ "$rc" -eq 2 ] || fail "expected exit 2 with no shared dir, got $rc"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "usage"
+}
+
+test_sync_on_windows_wraps_npx_and_uses_semicolons() {
+    make_shared
+    mkdir -p "$SHARED/mods/one" "$SHARED/mods/two"
+    sync_as MINGW64_NT-10.0 "$SHARED" || fail "sync exited non-zero: $(tail -n 3 "$SANDBOX/sync.log")"
+    [ "$(jq -c '[.mcpServers.myserver.command, .mcpServers.myserver.args]' "$HOME/.claude.json")" = '["cmd",["/c","npx","-y","pkg"]]' ] \
+        || fail "npx not wrapped: $(jq -c '.mcpServers.myserver' "$HOME/.claude.json")"
+    [ "$(jq -r '.env.CLAUDE_CODE_PLUGIN_DIRS' "$HOME/.claude/settings.json")" = "~/.claude/mods/one;~/.claude/mods/two" ] \
+        || fail "plugin dirs: $(jq -r '.env.CLAUDE_CODE_PLUGIN_DIRS' "$HOME/.claude/settings.json")"
+}
+
+test_config_check_runner_logs_and_exits_with_check_status() {
+    make_shared
+    export CLAUDE_CHECK_LOG_DIR="$SANDBOX/logs"
+    if bash "$CHECK_RUN_SH" "$SHARED"; then
+        fail "runner exited 0 despite drift"
+    fi
+    assert_contains "$(cat "$SANDBOX"/logs/check-*.log)" "=== run finished rc=1 at "
+    sync_as Linux "$SHARED" || fail "sync exited non-zero"
+    bash "$CHECK_RUN_SH" "$SHARED" || fail "runner exited non-zero when in sync"
+    assert_contains "$(tail -n 1 "$SANDBOX"/logs/check-*.log)" "=== run finished rc=0 at "
+    unset CLAUDE_CHECK_LOG_DIR
+}
+
+test_sync_exits_2_when_it_cannot_run() {
+    make_shared
+    rm "$SHARED/mcp.shared.json"
+    local rc=0
+    sync_as Linux --check "$SHARED" || rc=$?
+    [ "$rc" -eq 2 ] || fail "missing shared file: expected exit 2, got $rc"
+    export CLAUDE_CHECK_LOG_DIR="$SANDBOX/logs"
+    rc=0
+    bash "$CHECK_RUN_SH" "$SHARED" || rc=$?
+    unset CLAUDE_CHECK_LOG_DIR
+    [ "$rc" -eq 2 ] || fail "runner: expected exit 2, got $rc"
+    assert_contains "$(cat "$SANDBOX"/logs/check-*.log)" "=== run finished rc=2 at "
+
+    echo '{}' > "$SHARED/mcp.shared.json"
+    mkdir -p "$SANDBOX/nojq"
+    local tool
+    for tool in uname basename dirname cat; do ln -s "$(command -v "$tool")" "$SANDBOX/nojq/$tool"; done
+    rc=0
+    PATH="$SANDBOX/nojq" "$BASH" "$SYNC_SH" --check "$SHARED" > "$SANDBOX/sync.log" 2>&1 || rc=$?
+    [ "$rc" -eq 2 ] || fail "missing jq: expected exit 2, got $rc: $(cat "$SANDBOX/sync.log")"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "jq is required"
+}
+
+test_sync_mentions_bak_only_when_it_made_one() {
+    make_shared
+    rm "$HOME/.claude/settings.json" "$HOME/.claude.json"
+    sync_as Linux "$SHARED" || fail "sync exited non-zero"
+    assert_no_match "$(cat "$SANDBOX/sync.log")" "previous saved"
+    edit_json "$SHARED/settings.shared.json" '.permissions.allow += ["Bash(git log:*)"]'
+    edit_json "$SHARED/mcp.shared.json" '.mcpServers.other = {"command": "other"}'
+    sync_as Linux "$SHARED" || fail "sync exited non-zero"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "previous saved to settings.json.bak"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "previous saved to .claude.json.bak"
+    assert_exists "$HOME/.claude/settings.json.bak"
+    assert_exists "$HOME/.claude.json.bak"
+}
+
 echo "Running tests"
 for t in $(declare -F | awk '{print $3}' | grep '^test_'); do
     run_test "$t"

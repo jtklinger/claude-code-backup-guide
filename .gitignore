@@ -2,3 +2,6 @@
 # (settings.json is deliberately tracked: worktree.baseRef standard)
 .claude/*
 !.claude/settings.json
+
+# Local email settings for the Windows drift check
+scripts/sync/windows/alert.env
