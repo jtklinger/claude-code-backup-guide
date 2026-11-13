@@ -60,7 +60,7 @@ layer**).
 | `GLOBAL-PREFS.md` | `~/.claude/CLAUDE.md` | One `@`-import line, appended once. The machine's own text is untouched. |
 | `settings.shared.json` | `~/.claude/settings.json` | Permission and `autoMode` lists are joined; `env`, `modelSettings`, `enabledPlugins` are merged key by key with the shared value winning; other top-level shared values are set. `statusLine` is set only if the machine has none. Anything listed in `retiredAllows` is removed from `permissions.allow`. |
 | `mcp.shared.json` | `~/.claude.json` `mcpServers` | Shared servers are added or updated; each server keeps this machine's `env` values, where tokens live. On Windows an `npx` command is wrapped in `cmd /c`. Nothing from this file is printed. |
-| `skills/`, `agents/`, `mods/` | the same folders in `~/.claude` | One-way copy, shared layer wins. An entry only the machine has is reported as `untracked`, never deleted. |
+| `skills/`, `agents/`, `mods/` | the same folders in `~/.claude` | One-way copy, shared layer wins. An entry only the machine has is reported as `untracked`, never deleted. `skills/synced`, where Claude Code keeps its own copy of the account's skills, is left out of that list. |
 | `mods/<name>/` | `env.CLAUDE_CODE_PLUGIN_DIRS` | Set to the list of mods, `:`-separated (`;` on Windows). |
 | `enabledPlugins` | `claude plugin install` | Each enabled plugin is installed if missing. |
 | `statusline-command.sh` | `~/.claude/statusline-command.sh` | One-way copy. |

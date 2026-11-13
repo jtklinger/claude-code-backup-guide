@@ -1127,6 +1127,17 @@ test_sync_exits_2_when_it_cannot_run() {
     assert_contains "$(cat "$SANDBOX/sync.log")" "jq is required"
 }
 
+# skills/synced is Claude Code's own download of the account's skills, not a
+# machine-local skill to promote, so the check does not list it.
+test_sync_does_not_list_account_skills_as_untracked() {
+    make_shared
+    mkdir -p "$HOME/.claude/skills/synced/bucket/docx"
+    echo 'skill' > "$HOME/.claude/skills/synced/bucket/docx/SKILL.md"
+    sync_as Linux --check "$SHARED"
+    assert_no_match "$(cat "$SANDBOX/sync.log")" "skills/synced"
+    assert_contains "$(cat "$SANDBOX/sync.log")" "skills/pkg: untracked"
+}
+
 test_sync_mentions_bak_only_when_it_made_one() {
     make_shared
     rm "$HOME/.claude/settings.json" "$HOME/.claude.json"
