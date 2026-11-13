@@ -175,6 +175,8 @@ sync_dir() {
     for entry in "$dest"/*; do
         [ -e "$entry" ] || continue
         name="$(basename "$entry")"
+        # Claude Code keeps its own copy of the account's skills here; not ours to promote.
+        [ "$kind/$name" = skills/synced ] && continue
         [ -e "$src/$name" ] || note "$kind/$name: untracked (local only — promote it into $SHARED_DIR/$kind/ to share)"
     done
 }
