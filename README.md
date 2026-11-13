@@ -828,18 +828,21 @@ powershell -NoProfile -ExecutionPolicy Bypass -File "...\scripts\windows\install
 
 Skip this if your upgrade only changed `backup.sh` behavior, not the task wiring.
 
-**3. Verify.** Every script prints its version in the banner; confirm the new run via `--status`:
+**3. Verify.** Every script prints its version in its first line; `--status` shows it without running a backup:
 
 ```bash
 bash scripts/backup.sh /path/to/your-backup --status    # version, last commit, sync state, sizes
 ```
 
 ```
-Claude Code Backup Script v2.6.0
-==================================
+Claude Code Backup — Status (v2.6.0)
+==============================================
+  Backup dir:    /path/to/your-backup
+  Last commit:   4f10455  2026-11-11 09:05:09 -0500
+  ...
 ```
 
-Compare the banner against the [Changelog](#changelog) to confirm you picked up the expected release. On Windows, also confirm the next scheduled run writes a `1000` event: `Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 1`.
+A real backup run starts with `Claude Code Backup Script v2.6.0` instead. Compare the version against the [Changelog](#changelog) to confirm you picked up the expected release. On Windows, also confirm the next scheduled run writes a `1000` event: `Get-EventLog -LogName Application -Source ClaudeCodeBackup -Newest 1`.
 
 > **First `--fast` run after upgrading:** if your backup repo was last written by byte-exact runs, the first `--fast` run re-stamps every file's mtime once (so it isn't faster *that* run); subsequent runs get the speedup.
 
