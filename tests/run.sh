@@ -644,6 +644,80 @@ test_remap_warns_when_rule_matches_nothing() {
     assert_contains "$(strip_color "$SANDBOX/restore.log")" "WARNING.*C--Users-typo.*matched no"
 }
 
+# ─── Secret scan ───────────────────────────────────────────────────
+
+# Built in pieces so this file holds no token-shaped string for GitHub's push protection.
+FAKE_GH_TOKEN="gh""p_R7kQm2xVb9TzL4wNc8YpJ3hFd6SaGe1UoXi0"
+SESSION_SRC=".claude/projects/-home-me-proj/sess-1.jsonl"
+SESSION_IN_REPO="projects/-home-me-proj/sessions/sess-1.jsonl"
+
+run_backup_rc() {
+    rc=0
+    bash "$BACKUP_SH" "$BACKUP_REPO" > "$SANDBOX/backup.log" 2>&1 || rc=$?
+}
+
+committed_session() { git -C "$BACKUP_REPO" show "HEAD:$SESSION_IN_REPO"; }
+
+test_secret_scan_redacts_backup_copy_and_flags_new_secret() {
+    write_config '.'
+    echo "{\"out\":\"export GITHUB_TOKEN=$FAKE_GH_TOKEN\"}" > "$HOME/$SESSION_SRC"
+    run_backup_rc
+    [ "$rc" -ne 0 ] || fail "a new secret should make the run exit non-zero"
+    assert_contains "$(committed_session)" "REDACTED-BY-BACKUP-SCAN"
+    assert_no_match "$(committed_session)" "$FAKE_GH_TOKEN"
+    grep -qF "$FAKE_GH_TOKEN" "$HOME/$SESSION_SRC" || fail "the source transcript was modified"
+    assert_contains "$(strip_color "$SANDBOX/backup.log")" "github-pat.*sess-1\.jsonl"
+    assert_no_match "$(cat "$SANDBOX/backup.log")" "$FAKE_GH_TOKEN"
+}
+
+test_secret_scan_flags_a_secret_only_once() {
+    write_config '.'
+    echo "{\"out\":\"export GITHUB_TOKEN=$FAKE_GH_TOKEN\"}" > "$HOME/$SESSION_SRC"
+    run_backup_rc
+    echo '{"next":"turn"}' >> "$HOME/$SESSION_SRC"
+    run_backup_rc
+    [ "$rc" -eq 0 ] || fail "an already-redacted secret flagged the run again"
+    assert_contains "$(committed_session)" "next"
+    assert_no_match "$(committed_session)" "$FAKE_GH_TOKEN"
+    local before
+    before=$(commit_count)
+    run_backup_rc
+    [ "$(commit_count)" = "$before" ] || fail "an unchanged source made a new commit"
+}
+
+test_secret_scan_redacts_generic_match_without_flagging() {
+    write_config '.'
+    echo '{"out":"api_token=Zx8kQ2pL9vR4tY7wN3mB6cJ1"}' > "$HOME/$SESSION_SRC"
+    run_backup_rc
+    [ "$rc" -eq 0 ] || fail "a generic match should not fail the run: $(tail -n 3 "$SANDBOX/backup.log")"
+    assert_no_match "$(committed_session)" "Zx8kQ2pL9vR4tY7wN3mB6cJ1"
+}
+
+test_secret_scan_leaves_beta_flag_names_alone() {
+    write_config '.'
+    local line='{"betas":["claude-code-20250219","oauth-2025-04-20","interleaved-thinking-2025-05-14"]}'
+    echo "$line" > "$HOME/$SESSION_SRC"
+    run_backup
+    [ "$(committed_session)" = "$line" ] || fail "beta flag names were altered"
+}
+
+test_secret_scan_keeps_mcp_config_as_is() {
+    write_config '.'
+    jq --arg t "$FAKE_GH_TOKEN" '.mcpServers.myserver.env.GITHUB_TOKEN = $t' "$HOME/.claude.json" > "$SANDBOX/c.json"
+    mv "$SANDBOX/c.json" "$HOME/.claude.json"
+    run_backup
+    assert_contains "$(git -C "$BACKUP_REPO" show HEAD:global/claude.json)" "$FAKE_GH_TOKEN"
+}
+
+test_secret_scan_skipped_with_warning_without_gitleaks() {
+    write_config '.'
+    local gl_dir
+    gl_dir=$(dirname "$(command -v gitleaks)")
+    PATH=$(tr ':' '\n' <<< "$PATH" | grep -vxF "$gl_dir" | paste -sd:) run_backup_rc
+    [ "$rc" -eq 0 ] || fail "backup without gitleaks exited non-zero"
+    assert_contains "$(strip_color "$SANDBOX/backup.log")" "gitleaks not found"
+}
+
 # ─── Execute bits (issue #30) ──────────────────────────────────────
 
 # Backs up scripts that have no execute bit, as a Windows-made backup would hold them.

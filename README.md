@@ -34,7 +34,7 @@ This guide provides three scripts that back up the full Claude Code data model t
 
 Separately, `scripts/sync/` keeps several machines' settings alike from one shared folder; see [Keeping Machines in Sync](#keeping-machines-in-sync).
 
-**Requirements:** bash 4+, git, [jq](https://jqlang.github.io/jq/). The scripts use associative arrays, so bash 4 or newer is required — stock macOS ships bash 3.2, so on macOS run `brew install bash` and invoke with the newer bash (e.g. `/opt/homebrew/bin/bash`). Windows Git Bash and modern Linux already ship bash 4+.
+**Requirements:** bash 4+, git, [jq](https://jqlang.github.io/jq/); optionally [gitleaks](https://github.com/gitleaks/gitleaks) for the [secret scan](#secret-scan-of-transcripts). The scripts use associative arrays, so bash 4 or newer is required — stock macOS ships bash 3.2, so on macOS run `brew install bash` and invoke with the newer bash (e.g. `/opt/homebrew/bin/bash`). Windows Git Bash and modern Linux already ship bash 4+.
 
 ## What to Backup
 
@@ -429,6 +429,18 @@ It also includes `settings.local.json`, which may contain:
 Unlike v1, v2 backs up `~/.claude.json` and `settings.local.json` as-is (no sanitization). This is intentional -- sanitized files lose MCP server definitions and cannot be restored without manual reconfiguration.
 
 The trade-off is clear: **your backup repo is sensitive and must be private.** Treat it like you would a `.env` file or SSH private key.
+
+### Secret scan of transcripts
+
+Session transcripts keep whatever a session printed, so a token a command echoed ends up in the backup. When [gitleaks](https://github.com/gitleaks/gitleaks) is on `PATH`, `backup.sh` scans the staged changes before each commit, using `scripts/gitleaks.toml` (gitleaks' built-in rules, minus the false positives transcripts produce):
+
+- Every secret found is replaced with `REDACTED-BY-BACKUP-SCAN` in the **backup copy** only. `~/.claude` is never changed.
+- A secret from a specific rule (a GitHub token, a private key, ...) that this machine has not redacted before makes the run exit non-zero, so a scheduler's failure alert fires. A session saw that secret, so rotate it. Hashes of redacted secrets are kept in `~/.local/state/claude-backup/redacted-secrets`, so each one alerts once.
+- `generic-api-key` matches are mostly ordinary words, so they are redacted without an alert.
+- `global/claude.json` and `global/settings.local.json` are not scanned: they are backed up as-is by design (above).
+- If gitleaks errors, nothing is committed. Without gitleaks the scan is skipped with a warning.
+
+Only new changes are scanned. Secrets already in the repo's history stay there; rotate them rather than rewriting history.
 
 ### If credentials are exposed
 
