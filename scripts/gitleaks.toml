@@ -1,0 +1,19 @@
+# Secret-scan rules for backup.sh: gitleaks' built-in rules, minus the false
+# positives Claude Code transcripts produce by the thousand.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Backed up as-is by design so a restore keeps MCP logins (README: Credential handling)"
+paths = ['''^global/claude\.json$''', '''^global/settings\.local\.json$''']
+
+[[allowlists]]
+description = "anthropic-beta flag names in logged API headers (oauth-2025-04-20, ...)"
+targetRules = ["generic-api-key"]
+regexes = ['''^[a-z][a-z0-9-]*-20\d\d-\d\d-\d\d$''']
+
+[[allowlists]]
+description = "Claude Code's per-turn attribution id in transcript metadata"
+targetRules = ["generic-api-key"]
+regexTarget = "match"
+regexes = ['''turnAttributionKey''']

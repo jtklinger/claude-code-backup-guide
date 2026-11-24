@@ -995,6 +995,86 @@ show_status() {
     echo "  Git history:   $(du -sh .git 2>/dev/null | cut -f1)"
 }
 
+# ─── Secret scan ────────────────────────────────────────────────────
+
+# Transcripts keep whatever a session printed, tokens included, and this repo is
+# pushed off the machine. Before each commit gitleaks scans the staged changes, and
+# every secret it finds is replaced in the backup copy (never in ~/.claude). A secret
+# from a specific rule (a GitHub token, a private key, ...) that this machine has not
+# redacted before sets NEW_SECRETS, so the run exits non-zero and the scheduler's
+# failure alert fires: a session saw it, so it should be rotated. generic-api-key
+# matches are mostly ordinary words, so those are redacted without an alert.
+SECRET_SCAN_CONFIG="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/gitleaks.toml"
+REDACTION_MARK="REDACTED-BY-BACKUP-SCAN"
+NEW_SECRETS=false
+
+# run_gitleaks <report> — scan staged changes; exits the script if gitleaks errors,
+# so unscanned changes are never committed.
+run_gitleaks() {
+    if ! gitleaks git --pre-commit --staged --config "$SECRET_SCAN_CONFIG" --no-banner \
+        --log-level error --exit-code 0 --report-format json --report-path "$1" . >/dev/null 2>&1; then
+        rm -f "$1"
+        log_error "gitleaks failed -- not committing changes that were not scanned"
+        exit 1
+    fi
+}
+
+scan_staged_for_secrets() {
+    if ! command -v gitleaks &>/dev/null; then
+        log_warn "gitleaks not found -- skipping the secret scan (install gitleaks to keep tokens out of the backup)"
+        return 0
+    fi
+
+    # The report holds the raw secrets: keep it inside .git, private, and short-lived.
+    local report seen
+    report="$(git rev-parse --git-dir)/secret-scan.json"
+    seen="${XDG_STATE_HOME:-$HOME/.local/state}/claude-backup/redacted-secrets"
+    (umask 077 && : > "$report")
+    run_gitleaks "$report"
+
+    if [ "$(jq 'length' "$report")" -eq 0 ]; then
+        rm -f "$report"
+        log_info "Secret scan: clean"
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$seen")"
+    touch "$seen"
+    local file rule secret_b64 secret hash tmp repeats=0
+    local -A touched=()
+    while IFS=$'\t' read -r file rule secret_b64; do
+        secret=$(printf '%s' "$secret_b64" | base64 --decode)
+        tmp="$file.redact-tmp"
+        SECRET="$secret" MARK="$REDACTION_MARK" perl -0777 -pe 's/\Q$ENV{SECRET}\E/$ENV{MARK}/g' "$file" > "$tmp"
+        cat "$tmp" > "$file"
+        rm -f "$tmp"
+        touched["$file"]=1
+
+        hash=$(printf '%s' "$secret" | git hash-object --stdin)
+        if grep -qxF "$hash" "$seen"; then
+            repeats=$((repeats + 1))
+            continue
+        fi
+        echo "$hash" >> "$seen"
+        if [ "$rule" = "generic-api-key" ]; then
+            log_warn "Redacted a possible secret ($rule) in $file"
+        else
+            log_error "Redacted a NEW secret ($rule) in $file -- a session saw it, so rotate it"
+            NEW_SECRETS=true
+        fi
+    done < <(jq -r '.[] | [.File, .RuleID, (.Secret | @base64)] | @tsv' "$report")
+    [ "$repeats" -eq 0 ] || log_info "Redacted $repeats more copies of secrets already flagged"
+
+    git add -- "${!touched[@]}"
+    run_gitleaks "$report"
+    if [ "$(jq 'length' "$report")" -ne 0 ]; then
+        rm -f "$report"
+        log_error "Secrets remain after redaction -- not committing"
+        exit 1
+    fi
+    rm -f "$report"
+}
+
 # ─── Main Flow ──────────────────────────────────────────────────────
 
 main() {
@@ -1133,6 +1213,7 @@ main() {
         fi
     done
 
+    scan_staged_for_secrets
     write_manifest
 
     # Check if there are staged changes
@@ -1174,6 +1255,10 @@ main() {
     # reality instead of toasting success while the remote silently ages out.
     if [ "$push_failed" = true ]; then
         log_error "Exiting non-zero: git_auto_push is enabled but the push failed."
+        exit 1
+    fi
+    if [ "$NEW_SECRETS" = true ]; then
+        log_error "Exiting non-zero: new secrets were redacted from this backup (see above)."
         exit 1
     fi
 }
